@@ -4,13 +4,15 @@ from __future__ import annotations
 from app.db.database import db
 
 
-async def add_reaction(from_id: int, to_id: int, kind: str) -> bool:
+async def add_reaction(from_id: int, to_id: int, kind: str,
+                       note: str | None = None) -> bool:
     """Сохраняет реакцию. Возвращает True, если случилось совпадение."""
     await db.execute(
-        "INSERT INTO reactions (from_id, to_id, kind) VALUES (?, ?, ?) "
+        "INSERT INTO reactions (from_id, to_id, kind, note) VALUES (?, ?, ?, ?) "
         "ON CONFLICT(from_id, to_id) DO UPDATE SET kind = excluded.kind, "
+        "note = COALESCE(excluded.note, reactions.note), "
         "created_at = datetime('now')",
-        (from_id, to_id, kind),
+        (from_id, to_id, kind, note),
     )
     await db.execute("UPDATE users SET views_count = views_count + 1 WHERE id = ?", (to_id,))
 
@@ -48,6 +50,14 @@ async def has_reacted(from_id: int, to_id: int) -> bool:
         "SELECT 1 FROM reactions WHERE from_id = ? AND to_id = ?", (from_id, to_id)
     )
     return row is not None
+
+
+async def get_note(from_id: int, to_id: int) -> str | None:
+    """Текст, который отправитель приложил к лайку."""
+    return await db.fetchval(
+        "SELECT note FROM reactions WHERE from_id = ? AND to_id = ?",
+        (from_id, to_id),
+    )
 
 
 async def mark_like_seen(to_id: int, from_id: int) -> None:

@@ -26,6 +26,7 @@ class Registration(StatesGroup):
 class Browsing(StatesGroup):
     feed = State()          # лента анкет
     likes_inbox = State()   # «кто меня лайкнул»
+    note = State()          # пишем сообщение к лайку
 
 
 class EditProfile(StatesGroup):
@@ -68,3 +69,9 @@ class AdminPanel(StatesGroup):
     broadcast_confirm = State()
     setting_value = State()
     message_user = State()
+    staff_add = State()
+    ad_title = State()
+    ad_content = State()
+    ad_button_text = State()
+    ad_button_url = State()
+    ad_every = State()

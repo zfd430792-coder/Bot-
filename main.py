@@ -13,34 +13,15 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.redis import DefaultKeyBuilder, RedisStorage
-from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
-
 from app import handlers, middlewares
 from app.config import Settings, get_settings
 from app.db import moderation as mod_repo
 from app.db.database import db
+from app.services import commands as bot_commands
 from app.services import reengagement
 from app.services.notify import safe_send
 
 log = logging.getLogger("bot")
-
-USER_COMMANDS = [
-    BotCommand(command="start", description="Главное меню"),
-    BotCommand(command="search", description="Смотреть анкеты"),
-    BotCommand(command="profile", description="Моя анкета"),
-    BotCommand(command="settings", description="Настройки поиска"),
-    BotCommand(command="help", description="Помощь и безопасность"),
-]
-
-ADMIN_COMMANDS = USER_COMMANDS + [
-    BotCommand(command="admin", description="Админ-панель"),
-    BotCommand(command="stats", description="Статистика"),
-    BotCommand(command="broadcast", description="Рассылка"),
-    BotCommand(command="find", description="Найти пользователя"),
-    BotCommand(command="ban", description="Забанить"),
-    BotCommand(command="unban", description="Разбанить"),
-    BotCommand(command="verify", description="Запросить верификацию"),
-]
 
 
 def setup_logging() -> None:
@@ -51,17 +32,6 @@ def setup_logging() -> None:
         stream=sys.stdout,
     )
     logging.getLogger("aiogram.event").setLevel(logging.WARNING)
-
-
-async def set_commands(bot: Bot, admin_ids: list[int]) -> None:
-    await bot.set_my_commands(USER_COMMANDS, scope=BotCommandScopeDefault())
-    for admin_id in admin_ids:
-        try:
-            await bot.set_my_commands(
-                ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=admin_id)
-            )
-        except Exception as exc:
-            log.warning("Не удалось задать команды админу %s: %s", admin_id, exc)
 
 
 async def build_storage(settings: Settings) -> RedisStorage:
@@ -131,8 +101,13 @@ async def main() -> None:
     handlers.setup(dp)
 
     me = await bot.get_me()
-    log.info("Бот @%s запущен. Админы: %s", me.username, settings.admin_ids)
-    await set_commands(bot, settings.admin_ids)
+    moderators = [
+        int(row["id"]) for row in
+        await db.fetchall("SELECT id FROM users WHERE is_moderator = 1")
+    ]
+    log.info("Бот @%s запущен. Админы: %s, модераторов: %s",
+             me.username, settings.admin_ids, len(moderators))
+    await bot_commands.setup(bot, settings.admin_ids, moderators)
 
     background = [
         asyncio.create_task(housekeeping(bot)),

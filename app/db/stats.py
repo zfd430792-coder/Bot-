@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.db import ads as ads_repo
 from app.db import moderation as mod_repo
 from app.db.database import db
 
@@ -61,6 +62,11 @@ async def collect() -> dict[str, Any]:
         "SELECT COUNT(*) FROM captcha_state WHERE blocked_until > datetime('now')"
     )
 
+    ad_shows = await ads_repo.total_shows()
+    ad_active = await ads_repo.count_active()
+    moderators = await _val("SELECT COUNT(*) FROM users WHERE is_moderator = 1")
+    notes = await _val("SELECT COUNT(*) FROM reactions WHERE note IS NOT NULL")
+
     af_triggers = await mod_repo.get_int_setting("af_triggers", 0)
     af_autobans = await mod_repo.get_int_setting("af_autobans", 0)
     reminders_sent = await mod_repo.get_int_setting("reminders_sent", 0)
@@ -108,6 +114,10 @@ async def collect() -> dict[str, Any]:
         "captcha_pass": captcha_pass,
         "captcha_fail": captcha_fail,
         "captcha_blocked": captcha_blocked,
+        "ad_shows": ad_shows,
+        "ad_active": ad_active,
+        "moderators": moderators,
+        "notes": notes,
         "af_triggers": af_triggers,
         "af_autobans": af_autobans,
         "reminders_sent": reminders_sent,
@@ -118,6 +128,19 @@ async def collect() -> dict[str, Any]:
         "conversion": conversion,
         "match_rate": match_rate,
     }
+
+
+def render_short(s: dict[str, Any]) -> str:
+    """Сводка для модератора: только то, что нужно для дежурства."""
+    return (
+        "📊 <b>Сводка</b>\n\n"
+        f"👥 Анкет: <b>{s['registered']}</b>   Новых сегодня: +{s['new_today']}\n"
+        f"🔥 Активны за сутки: {s['active_day']}\n\n"
+        f"🚨 Открытых жалоб: <b>{s['reports_open']}</b>\n"
+        f"☑️ Ждут верификации: <b>{s['verify_wait']}</b>\n"
+        f"🚫 Забанено: {s['banned']}\n"
+        f"🛡 Автоблокировок: {s['af_autobans']}"
+    )
 
 
 def render(s: dict[str, Any]) -> str:
@@ -146,6 +169,7 @@ def render(s: dict[str, Any]) -> str:
         "❤️ <b>Активность в поиске</b>\n"
         f"   Лайков всего: <b>{s['likes']}</b> (сегодня {s['likes_today']})\n"
         f"   Пропусков: {s['dislikes']}\n"
+        f"   Лайков с сообщением: <b>{s['notes']}</b>\n"
         f"   Совпадений: <b>{s['matches']}</b> (сегодня {s['matches_today']})\n"
         f"   Доля взаимности: {s['match_rate']}%\n\n"
         "🛡 <b>Модерация</b>\n"
@@ -157,7 +181,10 @@ def render(s: dict[str, Any]) -> str:
         f"   Пройдено: {s['captcha_pass']}   Провалов: {s['captcha_fail']}\n"
         f"   Сейчас в блоке: {s['captcha_blocked']}\n\n"
         "🛡 <b>Антинакрутка</b>\n"
-        f"   Срабатываний: {s['af_triggers']}   Автобанов: <b>{s['af_autobans']}</b>\n\n"
+        f"   Срабатываний: {s['af_triggers']}   Автобанов: <b>{s['af_autobans']}</b>\n"
+        f"   Модераторов: {s['moderators']}\n\n"
+        "📣 <b>Реклама</b>\n"
+        f"   Активных постов: {s['ad_active']}   Показов: <b>{s['ad_shows']}</b>\n\n"
         "🔔 <b>Напоминания</b>\n"
         f"   Отправлено всего: {s['reminders_sent']}\n"
         f"   Не заходили сутки+: <b>{s['sleeping']}</b>   Отписались: {s['reminders_off']}\n\n"

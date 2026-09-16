@@ -86,9 +86,23 @@ CONFIRM_PROFILE = _kb([
 def browse(target_id: int, likes_left: int | None = None) -> InlineKeyboardMarkup:
     heart = "❤️" if likes_left is None else f"❤️ ({likes_left})"
     return _kb([
-        [_btn(heart, f"br:like:{target_id}"), _btn("👎", f"br:dislike:{target_id}")],
+        [_btn(heart, f"br:like:{target_id}"),
+         _btn("💌 С сообщением", f"br:note:{target_id}"),
+         _btn("👎", f"br:dislike:{target_id}")],
         [_btn("🚨 Пожаловаться", f"br:report:{target_id}"), _btn("💤 В меню", "br:stop")],
     ])
+
+
+def answer_like(sender_id: int) -> InlineKeyboardMarkup:
+    """Кнопки под уведомлением «вы кому-то понравились»."""
+    return _kb([
+        [_btn("❤️ Взаимно", f"ans:like:{sender_id}"),
+         _btn("👎 Не моё", f"ans:skip:{sender_id}")],
+        [_btn("🚨 Пожаловаться", f"br:report:{sender_id}")],
+    ])
+
+
+NOTE_CANCEL = _kb([[_btn("⬅️ Отмена", "br:note_cancel")]])
 
 
 NEXT_PROFILE = _kb([[_btn("▶️ Смотреть дальше", "br:next")]])
@@ -191,17 +205,40 @@ def verify_review(verification_id: int) -> InlineKeyboardMarkup:
 
 # ────────────────────────────── Админ-панель ────────────────────────────────
 
-def admin_menu(reports_open: int = 0, verify_wait: int = 0) -> InlineKeyboardMarkup:
+def admin_menu(reports_open: int = 0, verify_wait: int = 0,
+               is_admin: bool = True) -> InlineKeyboardMarkup:
+    """Полная панель владельцу, урезанная — модератору."""
     reports = f"🚨 Жалобы ({reports_open})" if reports_open else "🚨 Жалобы"
     verify = f"☑️ Верификация ({verify_wait})" if verify_wait else "☑️ Верификация"
-    return _kb([
-        [_btn("📊 Статистика", "adm:stats"), _btn("📢 Рассылка", "adm:bc")],
+
+    rows = [
         [_btn(reports, "adm:reports"), _btn(verify, "adm:verify")],
         [_btn("🔎 Найти пользователя", "adm:find")],
         [_btn("🚫 Забанить", "adm:ban"), _btn("✅ Разбанить", "adm:unban")],
-        [_btn("⚙️ Настройки бота", "adm:cfg")],
-        [_btn("❌ Закрыть", "adm:close")],
-    ])
+    ]
+    if is_admin:
+        rows.insert(0, [_btn("📊 Статистика", "adm:stats"),
+                        _btn("📢 Рассылка", "adm:bc")])
+        rows.append([_btn("📣 Реклама", "adm:ads"),
+                     _btn("👮 Модераторы", "adm:staff")])
+        rows.append([_btn("⚙️ Настройки бота", "adm:cfg")])
+    else:
+        rows.insert(0, [_btn("📊 Сводка", "adm:stats")])
+    rows.append([_btn("❌ Закрыть", "adm:close")])
+    return _kb(rows)
+
+
+def staff_list(moderators: list) -> InlineKeyboardMarkup:
+    """Список модераторов: у каждого кнопка снятия."""
+    builder = InlineKeyboardBuilder()
+    for row in moderators:
+        name = row["name"] or row["tg_name"] or str(row["id"])
+        builder.button(text=f"❌ {name} ({row['id']})",
+                       callback_data=f"adm:staff_del:{row['id']}")
+    builder.button(text="➕ Назначить модератора", callback_data="adm:staff_add")
+    builder.button(text="⬅️ В админ-панель", callback_data="adm:menu")
+    builder.adjust(1)
+    return builder.as_markup()
 
 
 ADMIN_BACK = _kb([[_btn("⬅️ В админ-панель", "adm:menu")]])
@@ -273,6 +310,33 @@ def report_actions(report_id: int, target_id: int) -> InlineKeyboardMarkup:
          _btn("☑️ Запросить верификацию", f"rp:verify:{report_id}")],
         [_btn("👤 Карточка", f"adm:card:{target_id}"),
          _btn("✅ Отклонить жалобу", f"rp:skip:{report_id}")],
+    ])
+
+
+def ads_list(ads: list) -> InlineKeyboardMarkup:
+    """Список рекламных постов: у каждого переключатель и удаление."""
+    builder = InlineKeyboardBuilder()
+    for ad in ads:
+        mark = "🟢" if ad["is_active"] else "⚪️"
+        builder.button(text=f"{mark} #{ad['id']} {ad['title'][:24]}",
+                       callback_data=f"adm:ad_view:{ad['id']}")
+        builder.button(text="⏸" if ad["is_active"] else "▶️",
+                       callback_data=f"adm:ad_toggle:{ad['id']}")
+        builder.button(text="🗑", callback_data=f"adm:ad_del:{ad['id']}")
+    builder.button(text="➕ Новый пост", callback_data="adm:ad_new")
+    builder.button(text="⬅️ В админ-панель", callback_data="adm:menu")
+    builder.adjust(*([3] * len(ads)), 1, 1)
+    return builder.as_markup()
+
+
+AD_NO_BUTTON = _kb([[_btn("⏭ Без кнопки", "adm:ad_nobutton")]])
+AD_CANCEL = _kb([[_btn("⬅️ Отмена", "adm:ads")]])
+
+
+def ad_confirm(ad_id: int) -> InlineKeyboardMarkup:
+    return _kb([
+        [_btn("🗑 Удалить", f"adm:ad_del:{ad_id}")],
+        [_btn("⬅️ К списку", "adm:ads")],
     ])
 
 

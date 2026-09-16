@@ -19,6 +19,7 @@ UPDATABLE = {
     "matches_count", "views_count", "reports_count",
     "notify_enabled", "notify_count", "last_notify_at",
     "af_strikes", "af_fast_streak", "af_ratio_after",
+    "is_moderator",
 }
 
 
@@ -62,7 +63,19 @@ async def find_user(query: str) -> aiosqlite.Row | None:
 
 
 async def update_user(user_id: int, **fields: Any) -> None:
-    payload = {k: v for k, v in fields.items() if k in UPDATABLE}
+    """Обновляет разрешённые поля анкеты.
+
+    Неизвестное имя — это опечатка или забытое поле в UPDATABLE. Раньше такие
+    молча игнорировались, и ошибка всплывала только в поведении бота, поэтому
+    теперь падаем сразу.
+    """
+    unknown = set(fields) - UPDATABLE
+    if unknown:
+        raise ValueError(
+            f"update_user: неизвестные поля {sorted(unknown)}. "
+            "Добавьте их в UPDATABLE, если поле действительно есть в таблице."
+        )
+    payload = dict(fields)
     if not payload:
         return
     assignments = ", ".join(f"{k} = ?" for k in payload)
@@ -214,7 +227,7 @@ async def incoming_likes(user_id: int, limit: int = 25) -> list[aiosqlite.Row]:
     """Анкеты тех, кто лайкнул нас, а мы ещё не ответили."""
     return await db.fetchall(
         """
-        SELECT u.*, r.created_at AS liked_at,
+        SELECT u.*, r.created_at AS liked_at, r.note AS like_note,
                dist_km(u.lat, u.lon,
                        (SELECT lat FROM users WHERE id = :me),
                        (SELECT lon FROM users WHERE id = :me)) AS distance

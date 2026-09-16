@@ -12,15 +12,21 @@ from app.config import Settings
 from app.db import moderation as mod_repo
 from app.db import stats as stats_repo
 from app.db import users as users_repo
-from app.handlers.admin.filters import IsAdmin
+from app.handlers.admin.filters import IsAdmin, IsStaff
 from app.keyboards import inline as kb
 from app.services import profile as profile_service
 from app.services.notify import safe_send
 from app.states import AdminPanel
 
-router = Router(name="admin-panel")
-router.message.filter(IsAdmin())
-router.callback_query.filter(IsAdmin())
+# Панель доступна всему персоналу; кнопки владельца собираются отдельно
+router = Router(name="staff-panel")
+router.message.filter(IsStaff())
+router.callback_query.filter(IsStaff())
+
+# Разделы, которые модератору недоступны
+admin_router = Router(name="admin-panel")
+admin_router.message.filter(IsAdmin())
+admin_router.callback_query.filter(IsAdmin())
 
 ADMIN_HELP = (
     "🛠 <b>Админ-панель</b>\n\n"
@@ -32,33 +38,49 @@ ADMIN_HELP = (
     "<code>/say 123456789 текст</code> — написать пользователю"
 )
 
+MOD_HELP = (
+    "👮 <b>Панель модератора</b>\n\n"
+    "Вам доступны жалобы, верификация и блокировки.\n\n"
+    "Быстрые команды:\n"
+    "<code>/find 123456789</code> — карточка пользователя\n"
+    "<code>/ban 123456789 причина</code> — бан\n"
+    "<code>/unban 123456789</code> — снять бан\n"
+    "<code>/verify 123456789</code> — потребовать верификацию\n\n"
+    "<i>Каждое действие попадает в журнал с вашим именем.</i>"
+)
 
-async def open_panel(message: Message, state: FSMContext) -> None:
-    await state.set_state(AdminPanel.menu)
+
+async def panel_view(is_admin: bool) -> tuple[str, Any]:
     reports = await mod_repo.count_open_reports()
     verify = await mod_repo.count_pending_verifications()
-    await message.answer(ADMIN_HELP, reply_markup=kb.admin_menu(reports, verify))
+    text = ADMIN_HELP if is_admin else MOD_HELP
+    return text, kb.admin_menu(reports, verify, is_admin=is_admin)
+
+
+async def open_panel(message: Message, state: FSMContext, is_admin: bool) -> None:
+    await state.set_state(AdminPanel.menu)
+    text, markup = await panel_view(is_admin)
+    await message.answer(text, reply_markup=markup)
 
 
 @router.message(Command("admin"))
+@router.message(Command("mod"))
 @router.message(F.text == "🛠 Админ-панель")
-async def admin_command(message: Message, state: FSMContext) -> None:
+@router.message(F.text == "👮 Модератор")
+async def admin_command(message: Message, state: FSMContext, is_admin: bool) -> None:
     await state.clear()
-    await open_panel(message, state)
+    await open_panel(message, state, is_admin)
 
 
 @router.callback_query(F.data == "adm:menu")
-async def back_to_menu(call: CallbackQuery, state: FSMContext) -> None:
+async def back_to_menu(call: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
     await state.set_state(AdminPanel.menu)
     await call.answer()
-    reports = await mod_repo.count_open_reports()
-    verify = await mod_repo.count_pending_verifications()
+    text, markup = await panel_view(is_admin)
     try:
-        await call.message.edit_text(ADMIN_HELP,
-                                     reply_markup=kb.admin_menu(reports, verify))
+        await call.message.edit_text(text, reply_markup=markup)
     except Exception:
-        await call.message.answer(ADMIN_HELP,
-                                  reply_markup=kb.admin_menu(reports, verify))
+        await call.message.answer(text, reply_markup=markup)
 
 
 @router.callback_query(F.data == "adm:close")
@@ -74,16 +96,18 @@ async def close_panel(call: CallbackQuery, state: FSMContext) -> None:
 # ───────────────────────────── Статистика ───────────────────────────────────
 
 @router.callback_query(F.data == "adm:stats")
-async def show_stats(call: CallbackQuery) -> None:
+async def show_stats(call: CallbackQuery, is_admin: bool) -> None:
     await call.answer()
     data = await stats_repo.collect()
-    await call.message.edit_text(stats_repo.render(data), reply_markup=kb.ADMIN_BACK)
+    text = stats_repo.render(data) if is_admin else stats_repo.render_short(data)
+    await call.message.edit_text(text, reply_markup=kb.ADMIN_BACK)
 
 
 @router.message(Command("stats"))
-async def stats_command(message: Message) -> None:
+async def stats_command(message: Message, is_admin: bool) -> None:
     data = await stats_repo.collect()
-    await message.answer(stats_repo.render(data))
+    await message.answer(stats_repo.render(data) if is_admin
+                         else stats_repo.render_short(data))
 
 
 # ─────────────────────── Карточка пользователя ──────────────────────────────
@@ -201,14 +225,14 @@ async def _settings_view(settings: Settings) -> tuple[str, Any]:
     return text, kb.bot_settings(likes, reg_open)
 
 
-@router.callback_query(F.data == "adm:cfg")
+@admin_router.callback_query(F.data == "adm:cfg")
 async def show_config(call: CallbackQuery, settings: Settings) -> None:
     await call.answer()
     text, markup = await _settings_view(settings)
     await call.message.edit_text(text, reply_markup=markup)
 
 
-@router.callback_query(F.data == "adm:set:registration")
+@admin_router.callback_query(F.data == "adm:set:registration")
 async def toggle_registration(call: CallbackQuery, settings: Settings) -> None:
     current = await mod_repo.get_setting("registration_open", "1") == "1"
     await mod_repo.set_setting("registration_open", "0" if current else "1")
@@ -217,7 +241,7 @@ async def toggle_registration(call: CallbackQuery, settings: Settings) -> None:
     await call.message.edit_text(text, reply_markup=markup)
 
 
-@router.callback_query(F.data == "adm:set:likes_limit")
+@admin_router.callback_query(F.data == "adm:set:likes_limit")
 async def ask_likes_limit(call: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AdminPanel.setting_value)
     await state.update_data(setting_key="likes_limit")
@@ -225,7 +249,7 @@ async def ask_likes_limit(call: CallbackQuery, state: FSMContext) -> None:
     await call.message.answer("Введите новый суточный лимит лайков (число от 1 до 1000):")
 
 
-@router.message(AdminPanel.setting_value, F.text)
+@admin_router.message(AdminPanel.setting_value, F.text)
 async def save_setting(message: Message, state: FSMContext, settings: Settings) -> None:
     data = await state.get_data()
     key = data.get("setting_key")

@@ -25,7 +25,12 @@ class UserContextMiddleware(BaseMiddleware):
             tg_user.id, tg_user.username, tg_user.full_name
         )
         settings = get_settings()
+        is_admin = settings.is_admin(tg_user.id)
+        is_moderator = bool(row["is_moderator"]) and not is_admin
+
         data["user"] = row
         data["settings"] = settings
-        data["is_admin"] = settings.is_admin(tg_user.id)
+        data["is_admin"] = is_admin
+        data["is_moderator"] = is_moderator
+        data["is_staff"] = is_admin or is_moderator
         return await handler(event, data)

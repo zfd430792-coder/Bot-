@@ -19,10 +19,12 @@ router = Router(name="menu")
 async def send_main_menu(bot: Bot, chat_id: int, user: Mapping[str, Any],
                          is_admin: bool, text: str | None = None) -> None:
     likes = await users_repo.count_incoming_likes(user["id"])
+    is_moderator = bool(user["is_moderator"]) if "is_moderator" in user.keys() else False
     await bot.send_message(
         chat_id,
         text or texts.MAIN_MENU,
-        reply_markup=rkb.main_menu(is_admin=is_admin, likes_count=likes),
+        reply_markup=rkb.main_menu(is_admin=is_admin, likes_count=likes,
+                                   is_moderator=is_moderator and not is_admin),
     )
 
 

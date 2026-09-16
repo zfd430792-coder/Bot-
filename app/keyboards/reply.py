@@ -11,11 +11,13 @@ BTN_PROFILE = "👤 Моя анкета"
 BTN_SETTINGS = "⚙️ Настройки поиска"
 BTN_HELP = "ℹ️ Помощь"
 BTN_ADMIN = "🛠 Админ-панель"
+BTN_MODERATOR = "👮 Модератор"
 
 REMOVE = ReplyKeyboardRemove()
 
 
-def main_menu(is_admin: bool = False, likes_count: int = 0) -> ReplyKeyboardMarkup:
+def main_menu(is_admin: bool = False, likes_count: int = 0,
+              is_moderator: bool = False) -> ReplyKeyboardMarkup:
     likes = f"{BTN_LIKES} ({likes_count})" if likes_count else BTN_LIKES
     rows = [
         [KeyboardButton(text=BTN_SEARCH)],
@@ -25,6 +27,8 @@ def main_menu(is_admin: bool = False, likes_count: int = 0) -> ReplyKeyboardMark
     ]
     if is_admin:
         rows.append([KeyboardButton(text=BTN_ADMIN)])
+    elif is_moderator:
+        rows.append([KeyboardButton(text=BTN_MODERATOR)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 

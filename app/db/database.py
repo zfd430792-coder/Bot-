@@ -71,6 +71,8 @@ CREATE TABLE IF NOT EXISTS users (
     af_ratio_after  INTEGER NOT NULL DEFAULT 0,
 
     -- напоминания уснувшим
+    is_moderator    INTEGER NOT NULL DEFAULT 0,
+
     notify_enabled  INTEGER NOT NULL DEFAULT 1,
     notify_count    INTEGER NOT NULL DEFAULT 0,
     last_notify_at  TEXT,
@@ -83,6 +85,7 @@ CREATE TABLE IF NOT EXISTS reactions (
     from_id     INTEGER NOT NULL,
     to_id       INTEGER NOT NULL,
     kind        TEXT NOT NULL,                  -- 'like' | 'dislike'
+    note        TEXT,                           -- сообщение, приложенное к лайку
     is_seen     INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (from_id, to_id)
@@ -168,6 +171,21 @@ CREATE TABLE IF NOT EXISTS bot_settings (
     value TEXT
 );
 
+CREATE TABLE IF NOT EXISTS ads (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    title        TEXT NOT NULL,
+    src_chat_id  INTEGER NOT NULL,   -- откуда копировать пост
+    src_message_id INTEGER NOT NULL,
+    preview      TEXT,               -- текстовый огрызок для списка в админке
+    button_text  TEXT,
+    button_url   TEXT,
+    every_n      INTEGER NOT NULL DEFAULT 10,   -- показывать раз в N анкет
+    is_active    INTEGER NOT NULL DEFAULT 1,
+    shows        INTEGER NOT NULL DEFAULT 0,
+    created_by   INTEGER,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS geo_cache (
     query      TEXT PRIMARY KEY,
     name       TEXT,
@@ -193,6 +211,7 @@ CREATE INDEX IF NOT EXISTS idx_reports_status ON reports (status, created_at);
 CREATE INDEX IF NOT EXISTS idx_reports_target ON reports (target_id);
 CREATE INDEX IF NOT EXISTS idx_verifications_status ON verifications (status, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_kind ON events (kind, created_at);
+CREATE INDEX IF NOT EXISTS idx_ads_active ON ads (is_active, shows);
 """
 
 EARTH_RADIUS_KM = 6371.0088
@@ -222,6 +241,10 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         "notify_count": "INTEGER NOT NULL DEFAULT 0",
         "last_notify_at": "TEXT",
         "verify_forced": "INTEGER NOT NULL DEFAULT 0",
+        "is_moderator": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "reactions": {
+        "note": "TEXT",
     },
 }
 

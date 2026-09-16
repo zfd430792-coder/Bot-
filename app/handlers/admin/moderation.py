@@ -10,19 +10,20 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app import texts
+from app.config import get_settings
 from app.db import moderation as mod_repo
 from app.db import users as users_repo
 from app.handlers import verification as verification_handlers
-from app.handlers.admin.filters import IsAdmin
+from app.handlers.admin.filters import IsStaff
 from app.handlers.admin.panel import send_user_card
 from app.keyboards import inline as kb
 from app.services import profile as profile_service
 from app.services.notify import admin_log, safe_send
 from app.states import AdminPanel
 
-router = Router(name="admin-moderation")
-router.message.filter(IsAdmin())
-router.callback_query.filter(IsAdmin())
+router = Router(name="staff-moderation")
+router.message.filter(IsStaff())
+router.callback_query.filter(IsStaff())
 
 DURATION_RE = re.compile(r"^\s*(\d{1,3})\s*([dhдч])\s+(.*)$", re.I)
 
@@ -38,7 +39,14 @@ def parse_reason(raw: str) -> tuple[str, str | None]:
 
 
 async def do_ban(bot: Bot, admin_id: int, target: Mapping[str, Any],
-                 raw_reason: str) -> str:
+                 raw_reason: str, by_admin: bool = True) -> str:
+    """Банит пользователя. Персонал защищён: модератор не трогает своих."""
+    if get_settings().is_admin(target["id"]):
+        return "🛡 Это владелец бота — забанить его нельзя."
+    if target["is_moderator"] and not by_admin:
+        return ("🛡 Это модератор. Снять его может только владелец "
+                "через «👮 Модераторы».")
+
     reason, offset = parse_reason(raw_reason)
     until = await users_repo.ban_until(offset) if offset else None
 
@@ -97,7 +105,8 @@ async def ban_from_card(call: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.message(AdminPanel.ban_reason, F.text)
-async def ban_apply(message: Message, state: FSMContext, bot: Bot) -> None:
+async def ban_apply(message: Message, state: FSMContext, bot: Bot,
+                    is_admin: bool) -> None:
     data = await state.get_data()
     target_id = int(data.get("ban_target") or 0)
     target = await users_repo.get_user(target_id)
@@ -105,13 +114,14 @@ async def ban_apply(message: Message, state: FSMContext, bot: Bot) -> None:
     if target is None:
         await message.answer("Пользователь не найден.")
         return
-    result = await do_ban(bot, message.from_user.id, target, message.text or "")
+    result = await do_ban(bot, message.from_user.id, target, message.text or "",
+                          by_admin=is_admin)
     await mod_repo.close_reports_for(target_id, message.from_user.id)
     await message.answer(result)
 
 
 @router.message(Command("ban"))
-async def ban_command(message: Message, bot: Bot) -> None:
+async def ban_command(message: Message, bot: Bot, is_admin: bool) -> None:
     parts = (message.text or "").split(maxsplit=2)
     if len(parts) < 2:
         await message.answer("Формат: <code>/ban 123456789 причина</code>")
@@ -121,7 +131,8 @@ async def ban_command(message: Message, bot: Bot) -> None:
         await message.answer("Пользователь не найден.")
         return
     reason = parts[2] if len(parts) > 2 else "нарушение правил"
-    result = await do_ban(bot, message.from_user.id, target, reason)
+    result = await do_ban(bot, message.from_user.id, target, reason,
+                          by_admin=is_admin)
     await mod_repo.close_reports_for(target["id"], message.from_user.id)
     await message.answer(result)
 

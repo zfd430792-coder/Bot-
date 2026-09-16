@@ -37,7 +37,7 @@ class AccessGateMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         user = data.get("user")
-        if user is None or data.get("is_admin"):
+        if user is None or data.get("is_staff"):
             return await handler(event, data)
 
         callback_data = event.data or "" if isinstance(event, CallbackQuery) else ""

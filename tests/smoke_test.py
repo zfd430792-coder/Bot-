@@ -38,6 +38,7 @@ from aiogram.fsm.storage.base import StorageKey                        # noqa: E
 
 from app import handlers, middlewares                                  # noqa: E402
 from app.config import get_settings                                    # noqa: E402
+from app.db import ads as ads_repo                                     # noqa: E402
 from app.db import moderation as mod_repo                              # noqa: E402
 from app.db import reactions as reactions_repo                         # noqa: E402
 from app.db import users as users_repo                                 # noqa: E402
@@ -51,6 +52,7 @@ from tests.fake_telegram import (                                      # noqa: E
 
 ALICE, BOB, CAROL, ADMIN = 100001, 100002, 100003, 900001
 DAVE, EVE, FRANK = 100004, 100005, 100006
+GLEB, HELEN, MOD1, MOD2 = 100007, 100008, 100009, 100010
 EXTRAS = list(range(200001, 200009))        # массовка для ленты
 
 passed = failed = 0
@@ -155,7 +157,15 @@ async def main() -> int:
     await db.connect(settings.db_path)
     storage = await build_storage(settings)
     await storage.redis.flushdb()          # прогон должен начинаться с чистого листа
-    h = Harness(storage)
+    try:
+        return await scenarios(Harness(storage), settings, storage)
+    finally:
+        # Закрываем даже при падении: иначе процесс виснет на открытых соединениях
+        await storage.close()
+        await db.close()
+
+
+async def scenarios(h: "Harness", settings, storage) -> int:
 
     # ── 1. Проверка username ────────────────────────────────────────────────
     section("1. Доступ без username")
@@ -630,8 +640,181 @@ async def main() -> int:
     check(user["age"] == 16, "возраст на уровне порога принимается")
     cfg.min_age = saved[2]
 
-    await storage.close()
-    await db.close()
+    # ── 19. Лайк с сообщением ───────────────────────────────────────────────
+    section("19. Лайк с сообщением")
+    await make_profile(GLEB, gender="m", name="Глеб")
+    await make_profile(HELEN, gender="f", name="Елена")
+    h.clear()
+
+    await h.text(GLEB, "🔍 Смотреть анкеты")
+    has_note_button = any(
+        "br:note" in str(getattr(c, "reply_markup", "")) for c in h.session.calls
+    )
+    check(has_note_button, "в ленте есть кнопка «С сообщением»")
+    h.clear()
+
+    await h.click(GLEB, f"br:note:{HELEN}")
+    check(h.said("Что написать"), "бот просит текст сообщения")
+    h.clear()
+
+    await h.text(GLEB, "Заходи в мой канал t.me/spam")
+    check(h.said("нельзя оставлять ссылки"), "ссылки в сообщении блокируются")
+    await h.text(GLEB, "я" * 400)
+    check(h.said("Слишком длинно"), "длинное сообщение отклоняется")
+    h.clear()
+
+    await h.text(GLEB, "Привет! Тоже люблю горы — где снимали фото?")
+    check(h.said("Сообщение отправлено"), "сообщение принято")
+    note = await reactions_repo.get_note(GLEB, HELEN)
+    check(note is not None and "горы" in note, "текст сохранён вместе с лайком")
+
+    to_helen = [c for c in h.session.calls if getattr(c, "chat_id", None) == HELEN]
+    check(bool(to_helen), "Елене пришло уведомление")
+    delivered = " ".join(
+        (getattr(c, "text", "") or getattr(c, "caption", "") or "") for c in to_helen
+    )
+    check("понравилась" in delivered, "в уведомлении сказано, что анкета понравилась")
+    check("Глеб" in delivered, "показана анкета отправителя")
+    check("где снимали фото" in delivered, "показан текст сообщения")
+    check(any("ans:like" in str(getattr(c, "reply_markup", "")) for c in to_helen),
+          "есть кнопки ответить или пропустить")
+    h.clear()
+
+    await h.click(HELEN, f"ans:like:{GLEB}")
+    check(h.said("Взаимная симпатия"), "ответ взаимностью создаёт совпадение")
+    check(len(await users_repo.get_matches(HELEN)) == 1, "совпадение сохранено")
+    h.clear()
+
+    # Если не ответить сразу, сообщение видно в разделе «кто меня лайкнул»
+    await make_profile(200100, gender="m", name="Игорь")
+    await reactions_repo.add_reaction(200100, HELEN, "like", "Сообщение из инбокса")
+    await h.text(HELEN, "❤️ Кто меня лайкнул")
+    check(h.said("Сообщение из инбокса"), "текст виден и в списке лайков")
+    h.clear()
+
+    # ── 20. Модераторы ──────────────────────────────────────────────────────
+    section("20. Модераторы с урезанными правами")
+    await make_profile(MOD1, gender="m", name="Модератор")
+    await make_profile(MOD2, gender="m", name="Модератор Два")
+    h.clear()
+
+    await h.click(ADMIN, "adm:staff_add", username="boss")
+    await h.text(ADMIN, str(MOD1), username="boss")
+    user = await users_repo.get_user(MOD1)
+    check(user["is_moderator"] == 1, "модератор назначен")
+    check(h.said("Вас назначили модератором"), "модератор уведомлён")
+    h.clear()
+
+    await h.text(MOD1, "/start")
+    keyboards = " ".join(str(getattr(c, "reply_markup", "")) for c in h.session.calls)
+    check("👮 Модератор" in keyboards, "в меню появилась кнопка модератора")
+    check("🛠 Админ-панель" not in keyboards, "кнопки админки у него нет")
+    h.clear()
+
+    await h.text(MOD1, "👮 Модератор")
+    check(h.said("Панель модератора"), "панель модератора открывается")
+    panel = " ".join(str(getattr(c, "reply_markup", "")) for c in h.session.calls)
+    check("adm:reports" in panel and "adm:ban" in panel, "жалобы и баны доступны")
+    check("adm:bc" not in panel, "рассылки в меню нет")
+    check("adm:ads" not in panel and "adm:staff" not in panel,
+          "рекламы и модераторов в меню нет")
+    check("adm:cfg" not in panel, "настроек бота в меню нет")
+    h.clear()
+
+    await h.click(MOD1, "adm:bc")
+    check(not h.said("Рассылка"), "прямое нажатие на рассылку не срабатывает")
+    h.clear()
+
+    await h.text(MOD1, f"/ban {GLEB} 1d проверка прав")
+    user = await users_repo.get_user(GLEB)
+    check(user["is_banned"] == 1, "модератор может забанить обычного пользователя")
+    await h.text(MOD1, f"/unban {GLEB}")
+    check((await users_repo.get_user(GLEB))["is_banned"] == 0,
+          "модератор может снять бан")
+    h.clear()
+
+    await users_repo.update_user(MOD2, is_moderator=1)
+    await h.text(MOD1, f"/ban {MOD2} попытка")
+    check(h.said("только владелец"), "модератор не может забанить модератора")
+    check((await users_repo.get_user(MOD2))["is_banned"] == 0, "цель не забанена")
+    h.clear()
+
+    await h.text(MOD1, f"/ban {ADMIN} попытка")
+    check(h.said("владелец бота"), "модератор не может забанить владельца")
+    h.clear()
+
+    await h.click(ADMIN, f"adm:staff_del:{MOD1}", username="boss")
+    check((await users_repo.get_user(MOD1))["is_moderator"] == 0, "права сняты")
+    h.clear()
+    await h.text(MOD1, "👮 Модератор")
+    check(not h.said("Панель модератора"), "бывший модератор в панель не попадает")
+    h.clear()
+
+    # ── 21. Рекламные посты ─────────────────────────────────────────────────
+    section("21. Реклама между анкетами")
+    await h.click(ADMIN, "adm:ads", username="boss")
+    check(h.said("Реклама"), "раздел рекламы открывается")
+    h.clear()
+
+    await h.click(ADMIN, "adm:ad_new", username="boss")
+    await h.text(ADMIN, "Канал знакомств", username="boss")
+    await h.text(ADMIN, "Подпишись на наш канал — там анонсы встреч!",
+                 username="boss")
+    await h.text(ADMIN, "Перейти в канал", username="boss")
+    await h.text(ADMIN, "не-ссылка", username="boss")
+    check(h.said("должна начинаться"), "неверная ссылка отклоняется")
+    await h.text(ADMIN, "https://t.me/example", username="boss")
+    await h.text(ADMIN, "2", username="boss")
+    check(h.said("число от 3 до 100"), "слишком частый показ не разрешён")
+    await h.text(ADMIN, "3", username="boss")
+
+    ads = await ads_repo.list_all()
+    check(len(ads) == 1, "пост создан")
+    check(ads[0]["title"] == "Канал знакомств", "название сохранено")
+    check(ads[0]["button_url"] == "https://t.me/example", "ссылка сохранена")
+    check(ads[0]["every_n"] == 3, "частота показа сохранена")
+    check(ads[0]["is_active"] == 1, "пост сразу активен")
+    ad_id = ads[0]["id"]
+    h.clear()
+
+    # Массовка, чтобы было что листать до появления поста
+    for index, extra in enumerate(range(200110, 200116)):
+        await make_profile(extra, gender="m", name=f"Гость {index + 1}")
+
+    async def browse_until_ad(viewer: int, steps: int) -> list:
+        await h.text(viewer, "🔍 Смотреть анкеты")
+        for _ in range(steps):
+            data = await h.state_data(viewer)
+            current = data.get("current")
+            if current:
+                await h.click(viewer, f"br:dislike:{current}")
+        return [c for c in h.session.calls
+                if type(c).__name__ == "CopyMessage"
+                and getattr(c, "chat_id", None) == viewer]
+
+    copies = await browse_until_ad(HELEN, 3)
+    check(bool(copies), "рекламный пост показан в ленте")
+    check(any("t.me/example" in str(getattr(c, "reply_markup", "")) for c in copies),
+          "под постом кнопка со ссылкой")
+    ad = await ads_repo.get(ad_id)
+    check(ad["shows"] >= 1, "показ засчитан")
+    h.clear()
+
+    await h.click(ADMIN, f"adm:ad_toggle:{ad_id}", username="boss")
+    ad = await ads_repo.get(ad_id)
+    check(ad["is_active"] == 0, "пост выключается")
+    shows_before = ad["shows"]
+    h.clear()
+
+    copies = await browse_until_ad(GLEB, 3)
+    ad = await ads_repo.get(ad_id)
+    check(ad["shows"] == shows_before and not copies,
+          "выключенный пост не показывается")
+    h.clear()
+
+    await h.click(ADMIN, f"adm:ad_del:{ad_id}", username="boss")
+    check(not await ads_repo.list_all(), "пост удаляется")
+
     print(f"\n\033[1mИтог: {passed} успешно, {failed} с ошибкой\033[0m")
     return 1 if failed else 0
 

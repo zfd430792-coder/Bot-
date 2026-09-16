@@ -37,7 +37,8 @@ def esc(text: str | None) -> str:
 
 
 def render_card(user: Mapping[str, Any], *, viewer: Mapping[str, Any] | None = None,
-                show_distance: bool = True, admin_view: bool = False) -> str:
+                show_distance: bool = True, admin_view: bool = False,
+                note: str | None = None) -> str:
     """Текст карточки. Координаты не раскрываются — только расстояние."""
     verified = " ☑️" if user["verify_status"] == "verified" else ""
     gender = GENDER_EMOJI.get(user["gender"], "")
@@ -59,6 +60,12 @@ def render_card(user: Mapping[str, Any], *, viewer: Mapping[str, Any] | None = N
 
     card = head + place + distance + about
 
+    # Сообщение, приложенное к лайку, — главное в карточке, выделяем его
+    if note is None and "like_note" in user.keys():
+        note = user["like_note"]
+    if note:
+        card += f"\n\n💌 <b>Сообщение для вас:</b>\n<i>{esc(note)}</i>"
+
     if admin_view:
         username = f"@{user['username']}" if user["username"] else "—"
         card += (
@@ -77,10 +84,11 @@ async def send_card(bot: Bot, chat_id: int, user: Mapping[str, Any], *,
                     markup: InlineKeyboardMarkup | None = None,
                     viewer: Mapping[str, Any] | None = None,
                     show_distance: bool = True,
-                    admin_view: bool = False) -> list[int]:
+                    admin_view: bool = False,
+                    note: str | None = None) -> list[int]:
     """Отправляет анкету. Возвращает id сообщений (их потом нужно удалить)."""
     caption = render_card(user, viewer=viewer, show_distance=show_distance,
-                          admin_view=admin_view)
+                          admin_view=admin_view, note=note)
     media_type, media_id = user["media_type"], user["media_id"]
     sent: list[Message] = []
 

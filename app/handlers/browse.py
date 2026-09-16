@@ -16,8 +16,10 @@ from app.db import reactions as reactions_repo
 from app.db import users as users_repo
 from app.db.database import db, haversine
 from app.handlers import menu as menu_handlers
+from app.handlers.registration import LINK_RE
 from app.keyboards import inline as kb
 from app.keyboards import reply as rkb
+from app.services import ads as ads_service
 from app.services import antifraud, profile
 from app.services.notify import safe_send
 from app.states import Browsing
@@ -62,14 +64,21 @@ async def show_next(bot: Bot, chat_id: int, state: FSMContext,
         if await reactions_repo.has_reacted(user["id"], target_id):
             continue
 
+        # Реклама идёт перед анкетой и убирается вместе с ней
+        ads_seen = int(data.get("ads_seen", 0)) + 1
+        ad_messages, ads_seen = await ads_service.maybe_send(bot, chat_id, ads_seen)
+
         left = await users_repo.likes_left(fresh_viewer, await _likes_limit(settings))
         card = _with_distance(target, fresh_viewer)
+        note = (await reactions_repo.get_note(target_id, user["id"])
+                if mode == "likes" else None)
         message_ids = await profile.send_card(
-            bot, chat_id, card, markup=kb.browse(target_id, left), viewer=fresh_viewer
+            bot, chat_id, card, markup=kb.browse(target_id, left),
+            viewer=fresh_viewer, note=note,
         )
         await state.set_state(Browsing.feed if mode == "search" else Browsing.likes_inbox)
-        await state.update_data(feed=queue, card_msgs=message_ids,
-                                current=target_id, feed_mode=mode)
+        await state.update_data(feed=queue, card_msgs=ad_messages + message_ids,
+                                current=target_id, feed_mode=mode, ads_seen=ads_seen)
         return
 
     # Анкеты кончились — возвращаем человека в меню одним сообщением
@@ -167,9 +176,130 @@ async def like(call: CallbackQuery, state: FSMContext, bot: Bot,
     if matched:
         await _announce_match(bot, user, target_id)
     else:
-        await _notify_like(bot, target_id)
+        await _notify_like(bot, user["id"], target_id, None)
 
     await show_next(bot, call.message.chat.id, state, user, settings)
+
+
+# ───────────────────── Лайк с сообщением ────────────────────────────────────
+
+@router.callback_query(F.data.startswith("br:note:"))
+async def ask_note(call: CallbackQuery, state: FSMContext, user: Mapping[str, Any],
+                   settings: Settings) -> None:
+    """Сначала убеждаемся, что лайк вообще возможен — иначе текст писался зря."""
+    target_id = int((call.data or "0").split(":")[-1])
+    limit = await _likes_limit(settings)
+    fresh = await users_repo.get_user(user["id"])
+    if await users_repo.likes_left(fresh, limit) <= 0:
+        await call.answer("Лимит лайков на сегодня исчерпан", show_alert=True)
+        await call.message.answer(texts.LIKE_LIMIT_REACHED.format(limit=limit, hours=24))
+        return
+
+    await state.set_state(Browsing.note)
+    await state.update_data(note_target=target_id)
+    await call.answer()
+    await call.message.answer(
+        texts.LIKE_NOTE_ASK.format(max_len=settings.note_max_len),
+        reply_markup=kb.NOTE_CANCEL,
+    )
+
+
+@router.callback_query(F.data == "br:note_cancel", Browsing.note)
+async def cancel_note(call: CallbackQuery, state: FSMContext, bot: Bot,
+                      user: Mapping[str, Any], settings: Settings) -> None:
+    await state.set_state(Browsing.feed)
+    await call.answer(texts.CANCELLED)
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await show_next(bot, call.message.chat.id, state, user, settings)
+
+
+@router.message(Browsing.note, F.text)
+async def send_note(message: Message, state: FSMContext, bot: Bot,
+                    user: Mapping[str, Any], settings: Settings) -> None:
+    note = (message.text or "").strip()
+    if not note:
+        await message.answer(texts.LIKE_NOTE_EMPTY)
+        return
+    if len(note) > settings.note_max_len:
+        await message.answer(texts.LIKE_NOTE_LONG.format(max_len=settings.note_max_len))
+        return
+    if LINK_RE.search(note):
+        await message.answer(texts.LIKE_NOTE_LINKS)
+        return
+
+    data = await state.get_data()
+    target_id = int(data.get("note_target") or 0)
+    if not target_id:
+        await state.set_state(Browsing.feed)
+        await show_next(bot, message.chat.id, state, user, settings)
+        return
+
+    limit = await _likes_limit(settings)
+    if not await users_repo.consume_like(user["id"], limit):
+        await state.set_state(Browsing.feed)
+        await message.answer(texts.LIKE_LIMIT_REACHED.format(limit=limit, hours=24))
+        return
+
+    matched = await reactions_repo.add_reaction(user["id"], target_id, "like", note)
+    await message.answer(texts.LIKE_NOTE_SENT)
+    await state.set_state(Browsing.feed)
+
+    if await antifraud.check(bot, user["id"], settings):
+        await state.clear()
+        return
+
+    if matched:
+        await _announce_match(bot, user, target_id)
+    else:
+        await _notify_like(bot, user["id"], target_id, note)
+
+    await show_next(bot, message.chat.id, state, user, settings)
+
+
+@router.message(Browsing.note)
+async def note_hint(message: Message, settings: Settings) -> None:
+    await message.answer(
+        texts.LIKE_NOTE_ASK.format(max_len=settings.note_max_len),
+        reply_markup=kb.NOTE_CANCEL,
+    )
+
+
+# ───────────── Ответ на уведомление «вы кому-то понравились» ────────────────
+
+@router.callback_query(F.data.startswith("ans:like:"))
+async def answer_like(call: CallbackQuery, bot: Bot, user: Mapping[str, Any],
+                      settings: Settings) -> None:
+    sender_id = int((call.data or "0").split(":")[-1])
+    limit = await _likes_limit(settings)
+    if not await users_repo.consume_like(user["id"], limit):
+        await call.answer("Лимит лайков на сегодня исчерпан", show_alert=True)
+        return
+
+    matched = await reactions_repo.add_reaction(user["id"], sender_id, "like")
+    await call.answer("❤️ Взаимно!" if matched else texts.LIKE_SENT)
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    if matched:
+        await _announce_match(bot, user, sender_id)
+    else:
+        await _notify_like(bot, user["id"], sender_id, None)
+
+
+@router.callback_query(F.data.startswith("ans:skip:"))
+async def answer_skip(call: CallbackQuery, user: Mapping[str, Any]) -> None:
+    sender_id = int((call.data or "0").split(":")[-1])
+    await reactions_repo.add_reaction(user["id"], sender_id, "dislike")
+    await call.answer(texts.DISLIKE_SENT)
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data.startswith("br:dislike:"))
@@ -235,11 +365,29 @@ async def _announce_match(bot: Bot, user: Mapping[str, Any], target_id: int) -> 
             log.warning("Не удалось показать анкету при совпадении: %s", exc)
 
 
-async def _notify_like(bot: Bot, target_id: int) -> None:
-    """Сообщаем о симпатии только один раз — пока лайк не разобран.
+async def _notify_like(bot: Bot, sender_id: int, target_id: int,
+                       note: str | None) -> None:
+    """Сообщаем о симпатии.
 
-    Так человек узнаёт о новых лайках, но не получает уведомление на каждый.
+    Лайк с сообщением показываем сразу и целиком — анкета плюс текст, чтобы
+    человек мог ответить не уходя из чата. Обычный лайк — короткий сигнал и
+    только один раз, пока предыдущие не разобраны, иначе это превратится
+    в поток уведомлений.
     """
+    if note:
+        sender = await users_repo.get_user(sender_id)
+        if sender is None:
+            return
+        await safe_send(bot, target_id, texts.NEW_LIKE_WITH_NOTE)
+        try:
+            await profile.send_card(
+                bot, target_id, dict(sender), note=note, show_distance=False,
+                markup=kb.answer_like(sender_id),
+            )
+        except Exception as exc:
+            log.warning("Не удалось показать анкету с сообщением: %s", exc)
+        return
+
     pending = await db.fetchval(
         "SELECT COUNT(*) FROM reactions WHERE to_id = ? AND kind = 'like' AND is_seen = 0",
         (target_id,), default=0,

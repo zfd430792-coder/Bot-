@@ -107,6 +107,7 @@ class Settings:
     name_min_len: int = 2
     name_max_len: int = 24
     about_max_len: int = 600
+    note_max_len: int = 300
     max_radius_km: int = 500
 
     @classmethod
