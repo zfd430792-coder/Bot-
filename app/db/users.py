@@ -17,6 +17,8 @@ UPDATABLE = {
     "ban_reason", "banned_until", "verify_status", "verify_code", "verified_at",
     "verify_forced", "likes_today", "likes_date", "likes_received",
     "matches_count", "views_count", "reports_count",
+    "notify_enabled", "notify_count", "last_notify_at",
+    "af_strikes", "af_fast_streak", "af_ratio_after",
 }
 
 
@@ -26,10 +28,12 @@ def today() -> str:
 
 async def ensure_user(user_id: int, username: str | None, tg_name: str | None) -> aiosqlite.Row:
     """Создаёт запись при первом обращении и всегда освежает username/активность."""
+    # notify_count = 0: человек вернулся, серия напоминаний начинается заново
     await db.execute(
         "INSERT INTO users (id, username, tg_name) VALUES (?, ?, ?) "
         "ON CONFLICT(id) DO UPDATE SET username = excluded.username, "
-        "tg_name = excluded.tg_name, last_active = datetime('now')",
+        "tg_name = excluded.tg_name, last_active = datetime('now'), "
+        "notify_count = 0",
         (user_id, username, tg_name),
     )
     row = await get_user(user_id)

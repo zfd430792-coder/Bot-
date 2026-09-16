@@ -18,7 +18,7 @@ from app.db.database import db, haversine
 from app.handlers import menu as menu_handlers
 from app.keyboards import inline as kb
 from app.keyboards import reply as rkb
-from app.services import profile
+from app.services import antifraud, profile
 from app.services.notify import safe_send
 from app.states import Browsing
 
@@ -159,6 +159,11 @@ async def like(call: CallbackQuery, state: FSMContext, bot: Bot,
     matched = await reactions_repo.add_reaction(user["id"], target_id, "like")
     await call.answer(texts.LIKE_SENT if not matched else "🎉 Взаимно!")
 
+    # Накрутка лайков: слишком быстро или вообще без пропусков
+    if await antifraud.check(bot, user["id"], settings):
+        await state.clear()
+        return
+
     if matched:
         await _announce_match(bot, user, target_id)
     else:
@@ -173,6 +178,24 @@ async def dislike(call: CallbackQuery, state: FSMContext, bot: Bot,
     target_id = int((call.data or "0").split(":")[-1])
     await reactions_repo.add_reaction(user["id"], target_id, "dislike")
     await call.answer()
+    if await antifraud.check(bot, user["id"], settings):
+        await state.clear()
+        return
+    await show_next(bot, call.message.chat.id, state, user, settings)
+
+
+@router.callback_query(F.data == "remind:search")
+async def from_reminder(call: CallbackQuery, state: FSMContext, bot: Bot,
+                        user: Mapping[str, Any], settings: Settings) -> None:
+    """Переход в ленту прямо из напоминания."""
+    await call.answer()
+    if not user["registered"]:
+        await call.message.answer("Сначала заполните анкету — /start")
+        return
+    if not user["is_active"]:
+        await users_repo.update_user(user["id"], is_active=1)
+        user = await users_repo.get_user(user["id"])
+    await state.update_data(feed=[], feed_mode="search", card_msgs=[])
     await show_next(bot, call.message.chat.id, state, user, settings)
 
 

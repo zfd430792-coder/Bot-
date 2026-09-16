@@ -162,7 +162,8 @@ async def save_age(message: Message, state: FSMContext, user,
         return
     age = int(raw)
     if age < settings.min_age:
-        await message.answer(texts.REG_AGE_UNDERAGE)
+        await message.answer(texts.REG_AGE_TOO_YOUNG.format(
+            min_age=settings.min_age))
         return
     if age > settings.max_age:
         await message.answer(texts.REG_AGE_BAD.format(

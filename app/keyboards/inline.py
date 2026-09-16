@@ -131,7 +131,8 @@ DELETE_CONFIRM = _kb([
 
 # ────────────────────────────── Настройки ───────────────────────────────────
 
-def settings(scope_value: str, has_coords: bool) -> InlineKeyboardMarkup:
+def settings(scope_value: str, has_coords: bool,
+             notify_enabled: bool = True) -> InlineKeyboardMarkup:
     rows = [
         [_btn("🎂 Возраст поиска", "st:age")],
         [_btn("🌍 Город / геопозиция", "st:city")],
@@ -143,6 +144,10 @@ def settings(scope_value: str, has_coords: bool) -> InlineKeyboardMarkup:
         if scope_value == "near":
             rows.append([_btn("📏 Радиус поиска", "st:radius")])
     rows.append([_btn("🔄 Вернуть пропущенные анкеты", "st:reset_skips")])
+    rows.append([_btn(
+        "🔔 Напоминания: включены" if notify_enabled else "🔕 Напоминания: выключены",
+        "st:notify",
+    )])
     rows.append([_btn("⬅️ В меню", "st:close")])
     return _kb(rows)
 
@@ -218,6 +223,22 @@ def admin_user_card(user_id: int, is_banned: bool, verified: bool,
     rows.append([_btn("✉️ Написать пользователю", f"adm:msg:{user_id}")])
     rows.append([_btn("⬅️ В админ-панель", "adm:menu")])
     return _kb(rows)
+
+
+def reminder_actions() -> InlineKeyboardMarkup:
+    """Кнопки под напоминанием: зайти или отписаться."""
+    return _kb([
+        [_btn("🔍 Смотреть анкеты", "remind:search")],
+        [_btn("🔕 Больше не напоминать", "remind:off")],
+    ])
+
+
+def autoban_actions(user_id: int) -> InlineKeyboardMarkup:
+    """Кнопки под уведомлением об автобане — последнее слово за админом."""
+    return _kb([
+        [_btn("✅ Разбанить", f"adm:unban_id:{user_id}"),
+         _btn("👤 Карточка", f"adm:card:{user_id}")],
+    ])
 
 
 def broadcast_audience() -> InlineKeyboardMarkup:

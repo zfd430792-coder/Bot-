@@ -26,25 +26,32 @@ os.environ.update(
     CAPTCHA_MIN_SOLVE_MS="400",
     CAPTCHA_MAX_ATTEMPTS="5",
     LIKES_LIMIT_PER_DAY="50",
+    # Отдельная база Redis, чтобы не мешать боевой
+    REDIS_URL=os.environ.get("TEST_REDIS_URL", "redis://localhost:6399/15"),
+    REDIS_PREFIX="smoketest",
 )
 
 from aiogram import Bot, Dispatcher                                    # noqa: E402
 from aiogram.client.default import DefaultBotProperties                # noqa: E402
 from aiogram.enums import ParseMode                                    # noqa: E402
 from aiogram.fsm.storage.base import StorageKey                        # noqa: E402
-from aiogram.fsm.storage.memory import MemoryStorage                   # noqa: E402
 
 from app import handlers, middlewares                                  # noqa: E402
 from app.config import get_settings                                    # noqa: E402
 from app.db import moderation as mod_repo                              # noqa: E402
+from app.db import reactions as reactions_repo                         # noqa: E402
 from app.db import users as users_repo                                 # noqa: E402
 from app.db.database import db                                         # noqa: E402
+from app.services import antifraud, reengagement                       # noqa: E402
+from main import build_storage                                         # noqa: E402
 from tests.fake_telegram import (                                      # noqa: E402
     FakeSession, callback_update, location_update, message_update,
     photo_update, video_update,
 )
 
 ALICE, BOB, CAROL, ADMIN = 100001, 100002, 100003, 900001
+DAVE, EVE, FRANK = 100004, 100005, 100006
+EXTRAS = list(range(200001, 200009))        # массовка для ленты
 
 passed = failed = 0
 
@@ -64,11 +71,12 @@ def section(title: str) -> None:
 
 
 class Harness:
-    def __init__(self) -> None:
+    def __init__(self, storage) -> None:
         self.session = FakeSession()
         self.bot = Bot(token=get_settings().bot_token, session=self.session,
                        default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-        self.dp = Dispatcher(storage=MemoryStorage())
+        self.storage = storage
+        self.dp = Dispatcher(storage=storage)
         middlewares.setup(self.dp, get_settings())
         handlers.setup(self.dp)
 
@@ -128,9 +136,26 @@ async def register(h: Harness, user_id: int, *, gender: str, looking: str,
     await h.click(user_id, "reg:confirm")
 
 
+async def make_profile(user_id: int, *, gender: str, name: str,
+                       city: str = "Волгоград", region: str = "Волгоградская область",
+                       lat: float = 48.708, lon: float = 44.513) -> None:
+    """Готовая анкета напрямую в базе — чтобы не проходить мастер ради массовки."""
+    await users_repo.ensure_user(user_id, f"user{user_id}", name)
+    await users_repo.update_user(
+        user_id, captcha_passed=1, rules_accepted=1, registered=1, is_active=1,
+        name=name, gender=gender, looking_for="any", age=25, about="Тестовая анкета",
+        media_type="photo", media_id=f"photo-{user_id}", city=city, region=region,
+        country="RU", lat=lat, lon=lon, geo_source="city", search_scope="city",
+        age_min=18, age_max=99,
+    )
+
+
 async def main() -> int:
-    await db.connect(get_settings().db_path)
-    h = Harness()
+    settings = get_settings()
+    await db.connect(settings.db_path)
+    storage = await build_storage(settings)
+    await storage.redis.flushdb()          # прогон должен начинаться с чистого листа
+    h = Harness(storage)
 
     # ── 1. Проверка username ────────────────────────────────────────────────
     section("1. Доступ без username")
@@ -194,7 +219,7 @@ async def main() -> int:
     await h.text(ALICE, "семнадцать")
     check(h.said("Введите возраст числом"), "возраст словами не принимается")
     await h.text(ALICE, "16")
-    check(h.said("только совершеннолетним"), "младше 18 не пускает")
+    check(h.said("Минимальный возраст"), "младше настроенного минимума не пускает")
     await h.text(ALICE, "26")
     await h.text(ALICE, "http://spam.example")
     check(h.said("Имя должно быть"), "ссылку вместо имени не берём")
@@ -320,6 +345,8 @@ async def main() -> int:
     await h.click(ADMIN, "adm:stats", username="boss")
     check(h.said("Статистика бота"), "статистика собирается")
     check(h.said("Совпадений"), "в статистике есть совпадения")
+    check(h.said("Антинакрутка") and h.said("Напоминания"),
+          "в статистике есть разделы защиты и напоминаний")
     h.clear()
     await h.text(ADMIN, f"/find {CAROL}", username="boss")
     check(h.said("Карина"), "поиск пользователя работает")
@@ -434,6 +461,176 @@ async def main() -> int:
     check(user["registered"] == 0 and user["name"] is None, "анкета удалена")
     check(not await users_repo.get_matches(BOB), "совпадения удалённого убраны")
 
+    # ── 15. Антинакрутка: скорость ──────────────────────────────────────────
+    section("15. Антинакрутка: слишком быстрые реакции")
+    cfg = get_settings()
+    saved = (cfg.af_fast_streak, cfg.af_ratio_window, cfg.min_age)
+    cfg.af_fast_streak, cfg.af_ratio_window = 4, 10_000   # долю лайков не проверяем
+
+    await make_profile(DAVE, gender="m", name="Дмитрий")
+    for i, extra in enumerate(EXTRAS):
+        await make_profile(extra, gender="f", name=f"Гостья {i + 1}")
+    h.clear()
+
+    await h.text(DAVE, "🔍 Смотреть анкеты")
+    for extra in EXTRAS[:6]:
+        await h.click(DAVE, f"br:dislike:{extra}")
+
+    user = await users_repo.get_user(DAVE)
+    check(user["af_strikes"] == 1, "зафиксировано первое нарушение")
+    check(user["captcha_passed"] == 0, "первое нарушение сбрасывает капчу")
+    check(user["is_banned"] == 0, "с первого раза не банит")
+    check(h.said("слишком быстро"), "пользователь предупреждён")
+    admin_notified = any(getattr(c, "chat_id", None) == ADMIN and
+                         "Антинакрутка" in (getattr(c, "text", "") or "")
+                         for c in h.session.calls)
+    check(admin_notified, "администратор уведомлён")
+    h.clear()
+
+    await h.text(DAVE, "🔍 Смотреть анкеты")
+    check(h.said("повторная проверка"), "до новой капчи бот закрыт")
+    h.clear()
+    await h.text(DAVE, "/start")
+    await solve_captcha(h, DAVE)
+    user = await users_repo.get_user(DAVE)
+    check(user["captcha_passed"] == 1, "капча пройдена заново")
+    check(h.said("Проверка пройдена"), "пользователь с анкетой вернулся в меню")
+    h.clear()
+
+    # ── 16. Антинакрутка: лайки без единого пропуска ────────────────────────
+    section("16. Антинакрутка: только лайки")
+    cfg.af_fast_streak, cfg.af_ratio_window = 10_000, 5   # скорость не проверяем
+
+    await make_profile(EVE, gender="f", name="Ева")
+    for extra in EXTRAS[:5]:
+        await reactions_repo.add_reaction(EVE, extra, "like")
+    h.clear()
+
+    action = await antifraud.check(h.bot, EVE, cfg)
+    check(action == "captcha", "серия из одних лайков распознана как накрутка")
+    user = await users_repo.get_user(EVE)
+    check(user["af_strikes"] == 1, "нарушение засчитано")
+
+    check(await antifraud.check(h.bot, EVE, cfg) is None,
+          "повторный страйк не начисляется, пока нет новой серии")
+
+    for extra in EXTRAS[5:8] + [EXTRAS[0] + 900, EXTRAS[0] + 901]:
+        await reactions_repo.add_reaction(EVE, extra, "like")
+    action = await antifraud.check(h.bot, EVE, cfg)
+    check(action == "ban_temp", "вторая серия одних лайков — временный бан")
+    user = await users_repo.get_user(EVE)
+    check(user["is_banned"] == 1 and user["banned_until"] is not None,
+          "бан выдан на срок")
+
+    await mod_repo.unban_user(EVE)
+    for i in range(5):
+        await reactions_repo.add_reaction(EVE, 300100 + i, "like")
+    action = await antifraud.check(h.bot, EVE, cfg)
+    check(action == "ban_permanent", "третья серия — бессрочный бан")
+    user = await users_repo.get_user(EVE)
+    check(user["is_banned"] == 1 and user["banned_until"] is None,
+          "бан бессрочный")
+    h.clear()
+
+    # Нормальное поведение не должно ловиться
+    await make_profile(FRANK, gender="m", name="Фёдор")
+    for i, extra in enumerate(EXTRAS[:5]):
+        await reactions_repo.add_reaction(FRANK, extra, "like" if i else "dislike")
+    check(await antifraud.check(h.bot, FRANK, cfg) is None,
+          "один пропуск из пяти — уже не накрутка")
+    cfg.af_fast_streak, cfg.af_ratio_window = saved[0], saved[1]
+    await mod_repo.unban_user(EVE)
+    h.clear()
+
+    # ── 17. Напоминания уснувшим ────────────────────────────────────────────
+    section("17. Напоминания тем, кто давно не заходил")
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    day_offset = (12 - now.hour) % 24          # чтобы у адресата был полдень
+    night_offset = (3 - now.hour) % 24         # а здесь — три часа ночи
+    day_lon = (day_offset if day_offset <= 12 else day_offset - 24) * 15
+    night_lon = (night_offset if night_offset <= 12 else night_offset - 24) * 15
+
+    check(reengagement.local_hour(day_lon, now) == 12, "местный час считается по долготе")
+    check(reengagement.is_quiet(3, cfg) and not reengagement.is_quiet(12, cfg),
+          "ночные часы распознаются")
+
+    await db.execute(
+        "UPDATE users SET last_active = datetime('now', '-3 days'), "
+        "last_notify_at = NULL, notify_count = 0, lon = ? WHERE id = ?",
+        (day_lon, FRANK),
+    )
+    rows = await reengagement.candidates(cfg)
+    check(any(r["id"] == FRANK for r in rows), "уснувший пользователь попал в очередь")
+
+    h.clear()
+    sent = await reengagement.send_batch(h.bot, cfg)
+    check(sent >= 1, f"напоминания отправлены ({sent} шт.)")
+    user = await users_repo.get_user(FRANK)
+    check(user["notify_count"] == 1, "счётчик напоминаний увеличен")
+    check(user["last_notify_at"] is not None, "время напоминания записано")
+    rows = await reengagement.candidates(cfg)
+    check(not any(r["id"] == FRANK for r in rows),
+          "повторно в тот же день не напоминаем")
+    h.clear()
+
+    await db.execute(
+        "UPDATE users SET last_active = datetime('now', '-3 days'), "
+        "last_notify_at = NULL, notify_count = 0, lon = ? WHERE id = ?",
+        (night_lon, FRANK),
+    )
+    sent = await reengagement.send_batch(h.bot, cfg)
+    check(sent == 0, "ночью не беспокоим")
+    h.clear()
+
+    # Текст подстраивается: есть лайки — зовём смотреть их
+    await db.execute("UPDATE users SET lon = ? WHERE id = ?", (day_lon, FRANK))
+    await reactions_repo.add_reaction(EXTRAS[6], FRANK, "like")
+    rows = await reengagement.candidates(cfg)
+    row = next(r for r in rows if r["id"] == FRANK)
+    check(int(row["pending_likes"]) >= 1, "непросмотренные лайки посчитаны")
+    check("понравились" in reengagement.compose(row), "текст зовёт посмотреть лайки")
+
+    await reengagement.send_batch(h.bot, cfg)
+    h.clear()
+    await h.click(FRANK, "remind:off")
+    user = await users_repo.get_user(FRANK)
+    check(user["notify_enabled"] == 0, "кнопка «не напоминать» работает")
+    rows = await reengagement.candidates(cfg)
+    check(not any(r["id"] == FRANK for r in rows), "отписавшемуся больше не пишем")
+    h.clear()
+
+    await users_repo.update_user(FRANK, notify_enabled=1, notify_count=3)
+    await db.execute("UPDATE users SET last_active = datetime('now', '-9 days'), "
+                     "last_notify_at = datetime('now', '-9 days') WHERE id = ?", (FRANK,))
+    rows = await reengagement.candidates(cfg)
+    check(not any(r["id"] == FRANK for r in rows),
+          "после трёх проигнорированных напоминаний бот замолкает")
+    await h.text(FRANK, "/start")
+    user = await users_repo.get_user(FRANK)
+    check(user["notify_count"] == 0, "возврат пользователя обнуляет счётчик")
+    h.clear()
+
+    # ── 18. Возрастной порог настраивается ──────────────────────────────────
+    section("18. Возрастной порог задаётся настройкой")
+    cfg.min_age = 16
+    await users_repo.ensure_user(700001, "teen", "Подросток")
+    await users_repo.update_user(700001, captcha_passed=1, rules_accepted=1)
+    await h.text(700001, "/start", username="teen")
+    await h.click(700001, "reg:gender:m", username="teen")
+    await h.click(700001, "reg:look:f", username="teen")
+    h.clear()
+    await h.text(700001, "15", username="teen")
+    check(h.said("Минимальный возраст"), "ниже настроенного порога не пускает")
+    check(h.said("16"), "в сообщении указан настроенный порог")
+    h.clear()
+    await h.text(700001, "16", username="teen")
+    user = await users_repo.get_user(700001)
+    check(user["age"] == 16, "возраст на уровне порога принимается")
+    cfg.min_age = saved[2]
+
+    await storage.close()
     await db.close()
     print(f"\n\033[1mИтог: {passed} успешно, {failed} с ошибкой\033[0m")
     return 1 if failed else 0

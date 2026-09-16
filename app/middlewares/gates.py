@@ -58,7 +58,16 @@ class AccessGateMiddleware(BaseMiddleware):
             await _reply(event, texts.NEED_USERNAME, kb.CHECK_USERNAME)
             return None
 
-        # 3. Принудительная верификация: бот закрыт, пока админ не подтвердит
+        # 3. Капчу сбросила антинакрутка — пока не пройдена, дальше не пускаем
+        if user["registered"] and not user["captcha_passed"]:
+            if callback_data.startswith("cap:"):
+                return await handler(event, data)
+            if isinstance(event, Message) and (event.text or "").startswith("/start"):
+                return await handler(event, data)
+            await _reply(event, texts.CAPTCHA_RECHECK)
+            return None
+
+        # 4. Принудительная верификация: бот закрыт, пока админ не подтвердит
         if user["verify_forced"] and user["verify_status"] != "verified":
             if callback_data.startswith(ALLOWED_CALLBACKS):
                 return await handler(event, data)

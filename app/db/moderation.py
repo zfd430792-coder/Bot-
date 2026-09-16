@@ -189,6 +189,16 @@ async def set_setting(key: str, value: str) -> None:
     )
 
 
+async def bump_counter(key: str, amount: int = 1) -> None:
+    """Накопительный счётчик для статистики (автобаны, напоминания)."""
+    await db.execute(
+        "INSERT INTO bot_settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET "
+        "value = CAST(CAST(bot_settings.value AS INTEGER) + ? AS TEXT)",
+        (key, str(amount), amount),
+    )
+
+
 async def get_int_setting(key: str, default: int) -> int:
     raw = await get_setting(key)
     try:

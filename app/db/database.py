@@ -64,16 +64,20 @@ CREATE TABLE IF NOT EXISTS users (
     views_count     INTEGER NOT NULL DEFAULT 0,
     reports_count   INTEGER NOT NULL DEFAULT 0,
 
+    -- антинакрутка
+    af_strikes      INTEGER NOT NULL DEFAULT 0,
+    af_fast_streak  INTEGER NOT NULL DEFAULT 0,
+    af_last_reaction TEXT,
+    af_ratio_after  INTEGER NOT NULL DEFAULT 0,
+
+    -- напоминания уснувшим
+    notify_enabled  INTEGER NOT NULL DEFAULT 1,
+    notify_count    INTEGER NOT NULL DEFAULT 0,
+    last_notify_at  TEXT,
+
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     last_active     TEXT NOT NULL DEFAULT (datetime('now'))
 );
-
-CREATE INDEX IF NOT EXISTS idx_users_search
-    ON users (registered, is_active, is_banned, gender, age);
-CREATE INDEX IF NOT EXISTS idx_users_city   ON users (country, city);
-CREATE INDEX IF NOT EXISTS idx_users_region ON users (country, region);
-CREATE INDEX IF NOT EXISTS idx_users_coords ON users (lat, lon);
-CREATE INDEX IF NOT EXISTS idx_users_active ON users (last_active);
 
 CREATE TABLE IF NOT EXISTS reactions (
     from_id     INTEGER NOT NULL,
@@ -83,7 +87,6 @@ CREATE TABLE IF NOT EXISTS reactions (
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (from_id, to_id)
 );
-CREATE INDEX IF NOT EXISTS idx_reactions_inbox ON reactions (to_id, kind, is_seen);
 
 CREATE TABLE IF NOT EXISTS matches (
     user_a      INTEGER NOT NULL,               -- всегда меньший id
@@ -103,8 +106,6 @@ CREATE TABLE IF NOT EXISTS reports (
     handled_at  TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE INDEX IF NOT EXISTS idx_reports_status ON reports (status, created_at);
-CREATE INDEX IF NOT EXISTS idx_reports_target ON reports (target_id);
 
 CREATE TABLE IF NOT EXISTS verifications (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,7 +121,6 @@ CREATE TABLE IF NOT EXISTS verifications (
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     reviewed_at TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_verifications_status ON verifications (status, created_at);
 
 CREATE TABLE IF NOT EXISTS bans (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -139,7 +139,6 @@ CREATE TABLE IF NOT EXISTS events (
     payload     TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE INDEX IF NOT EXISTS idx_events_kind ON events (kind, created_at);
 
 CREATE TABLE IF NOT EXISTS captcha_state (
     user_id       INTEGER PRIMARY KEY,
@@ -180,6 +179,22 @@ CREATE TABLE IF NOT EXISTS geo_cache (
 );
 """
 
+INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_users_search
+    ON users (registered, is_active, is_banned, gender, age);
+CREATE INDEX IF NOT EXISTS idx_users_city   ON users (country, city);
+CREATE INDEX IF NOT EXISTS idx_users_region ON users (country, region);
+CREATE INDEX IF NOT EXISTS idx_users_coords ON users (lat, lon);
+CREATE INDEX IF NOT EXISTS idx_users_active ON users (last_active);
+CREATE INDEX IF NOT EXISTS idx_users_notify
+    ON users (registered, is_banned, notify_enabled, last_active);
+CREATE INDEX IF NOT EXISTS idx_reactions_inbox ON reactions (to_id, kind, is_seen);
+CREATE INDEX IF NOT EXISTS idx_reports_status ON reports (status, created_at);
+CREATE INDEX IF NOT EXISTS idx_reports_target ON reports (target_id);
+CREATE INDEX IF NOT EXISTS idx_verifications_status ON verifications (status, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_kind ON events (kind, created_at);
+"""
+
 EARTH_RADIUS_KM = 6371.0088
 
 
@@ -193,6 +208,22 @@ def haversine(lat1: float | None, lon1: float | None,
     dl = math.radians(lon2 - lon1)
     a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
     return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(a))
+
+
+# Поля, добавленные после первого релиза. Для уже созданных баз
+# CREATE TABLE IF NOT EXISTS ничего не меняет, поэтому дописываем их вручную.
+MIGRATIONS: dict[str, dict[str, str]] = {
+    "users": {
+        "af_strikes": "INTEGER NOT NULL DEFAULT 0",
+        "af_fast_streak": "INTEGER NOT NULL DEFAULT 0",
+        "af_last_reaction": "TEXT",
+        "af_ratio_after": "INTEGER NOT NULL DEFAULT 0",
+        "notify_enabled": "INTEGER NOT NULL DEFAULT 1",
+        "notify_count": "INTEGER NOT NULL DEFAULT 0",
+        "last_notify_at": "TEXT",
+        "verify_forced": "INTEGER NOT NULL DEFAULT 0",
+    },
+}
 
 
 class Database:
@@ -218,9 +249,28 @@ class Database:
         await self._conn.execute("PRAGMA foreign_keys=ON")
         # Считать расстояние прямо в SQL — так поиск «рядом» делается одним запросом
         await self._conn.create_function("dist_km", 4, haversine, deterministic=True)
+        # Порядок важен: сначала таблицы, потом недостающие колонки и только
+        # затем индексы — иначе индекс по новой колонке упадёт на старой базе.
         await self._conn.executescript(SCHEMA)
         await self._conn.commit()
+        await self._migrate()
+        await self._conn.executescript(INDEXES)
+        await self._conn.commit()
         log.info("База данных готова: %s", path)
+
+    async def _migrate(self) -> None:
+        """Дописывает недостающие колонки в уже существующую базу."""
+        for table, columns in MIGRATIONS.items():
+            async with self.conn.execute(f"PRAGMA table_info({table})") as cur:
+                existing = {row[1] for row in await cur.fetchall()}
+            for name, definition in columns.items():
+                if name in existing:
+                    continue
+                await self.conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {name} {definition}"
+                )
+                log.info("Миграция: в %s добавлена колонка %s", table, name)
+        await self.conn.commit()
 
     async def close(self) -> None:
         if self._conn is not None:

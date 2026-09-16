@@ -66,6 +66,8 @@ class Settings:
     log_chat_id: int | None = None
 
     db_path: Path = BASE_DIR / "data" / "bot.db"
+    redis_url: str = "redis://localhost:6379/0"
+    redis_prefix: str = "dating"
 
     likes_limit_per_day: int = 50
     min_age: int = 18
@@ -84,6 +86,22 @@ class Settings:
 
     geocoder_enabled: bool = False
     geocoder_email: str = ""
+
+    # Автоматическая защита от накрутки лайков
+    antifraud_enabled: bool = True
+    af_fast_seconds: float = 1.2      # быстрее этого реакция считается машинной
+    af_fast_streak: int = 12          # столько быстрых реакций подряд = сигнал
+    af_ratio_window: int = 30         # на скольких последних реакциях смотрим долю
+    af_ratio_threshold: float = 0.95  # доля лайков, после которой это накрутка
+    af_ban_hours: int = 24            # срок автобана на втором нарушении
+
+    # Напоминания уснувшим пользователям
+    reengagement_enabled: bool = True
+    inactive_hours: int = 24          # через сколько молчания напоминать
+    reminder_cooldown_hours: int = 72 # не чаще одного напоминания в этот срок
+    reminder_max_count: int = 3       # после стольких проигнорированных — молчим
+    quiet_hours_start: int = 22       # ночью не пишем (по местному времени)
+    quiet_hours_end: int = 9
 
     # Ограничения профиля
     name_min_len: int = 2
@@ -124,7 +142,7 @@ class Settings:
             log_chat_id=log_chat_id,
             db_path=db_path,
             likes_limit_per_day=_int("LIKES_LIMIT_PER_DAY", 50),
-            min_age=max(18, _int("MIN_AGE", 18)),  # 18+ жёстко, ниже опускать нельзя
+            min_age=max(1, _int("MIN_AGE", 18)),
             max_age=_int("MAX_AGE", 99),
             default_radius_km=_int("DEFAULT_RADIUS_KM", 50),
             max_video_seconds=_int("MAX_VIDEO_SECONDS", 15),
@@ -137,6 +155,20 @@ class Settings:
             throttle_seconds=_float("THROTTLE_SECONDS", 0.4),
             geocoder_enabled=_bool("GEOCODER_ENABLED", False),
             geocoder_email=os.getenv("GEOCODER_EMAIL", "").strip(),
+            redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0").strip(),
+            redis_prefix=os.getenv("REDIS_PREFIX", "dating").strip() or "dating",
+            antifraud_enabled=_bool("ANTIFRAUD_ENABLED", True),
+            af_fast_seconds=_float("AF_FAST_SECONDS", 1.2),
+            af_fast_streak=_int("AF_FAST_STREAK", 12),
+            af_ratio_window=_int("AF_RATIO_WINDOW", 30),
+            af_ratio_threshold=_float("AF_RATIO_THRESHOLD", 0.95),
+            af_ban_hours=_int("AF_BAN_HOURS", 24),
+            reengagement_enabled=_bool("REENGAGEMENT_ENABLED", True),
+            inactive_hours=_int("INACTIVE_HOURS", 24),
+            reminder_cooldown_hours=_int("REMINDER_COOLDOWN_HOURS", 72),
+            reminder_max_count=_int("REMINDER_MAX_COUNT", 3),
+            quiet_hours_start=_int("QUIET_HOURS_START", 22),
+            quiet_hours_end=_int("QUIET_HOURS_END", 9),
         )
 
     @property

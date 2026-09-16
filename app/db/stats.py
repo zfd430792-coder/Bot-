@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.db import moderation as mod_repo
 from app.db.database import db
 
 
@@ -60,6 +61,15 @@ async def collect() -> dict[str, Any]:
         "SELECT COUNT(*) FROM captcha_state WHERE blocked_until > datetime('now')"
     )
 
+    af_triggers = await mod_repo.get_int_setting("af_triggers", 0)
+    af_autobans = await mod_repo.get_int_setting("af_autobans", 0)
+    reminders_sent = await mod_repo.get_int_setting("reminders_sent", 0)
+    reminders_off = await _val("SELECT COUNT(*) FROM users WHERE notify_enabled = 0")
+    sleeping = await _val(
+        "SELECT COUNT(*) FROM users WHERE registered = 1 AND is_banned = 0 "
+        "AND last_active < datetime('now', '-1 day')"
+    )
+
     avg_age = await db.fetchval(
         "SELECT ROUND(AVG(age), 1) FROM users WHERE registered = 1", default=0
     )
@@ -98,6 +108,11 @@ async def collect() -> dict[str, Any]:
         "captcha_pass": captcha_pass,
         "captcha_fail": captcha_fail,
         "captcha_blocked": captcha_blocked,
+        "af_triggers": af_triggers,
+        "af_autobans": af_autobans,
+        "reminders_sent": reminders_sent,
+        "reminders_off": reminders_off,
+        "sleeping": sleeping,
         "avg_age": avg_age or 0,
         "top_cities": [(r["city"], r["cnt"]) for r in top_cities],
         "conversion": conversion,
@@ -141,5 +156,10 @@ def render(s: dict[str, Any]) -> str:
         "🤖 <b>Капча</b>\n"
         f"   Пройдено: {s['captcha_pass']}   Провалов: {s['captcha_fail']}\n"
         f"   Сейчас в блоке: {s['captcha_blocked']}\n\n"
+        "🛡 <b>Антинакрутка</b>\n"
+        f"   Срабатываний: {s['af_triggers']}   Автобанов: <b>{s['af_autobans']}</b>\n\n"
+        "🔔 <b>Напоминания</b>\n"
+        f"   Отправлено всего: {s['reminders_sent']}\n"
+        f"   Не заходили сутки+: <b>{s['sleeping']}</b>   Отписались: {s['reminders_off']}\n\n"
         "🏙 <b>Топ городов</b>\n" + cities
     )

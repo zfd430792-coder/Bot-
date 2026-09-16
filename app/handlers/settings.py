@@ -39,13 +39,15 @@ def render(user: Mapping[str, Any]) -> str:
                 else "📍 геопозиция не передана")
     radius = (f"\n📏 Радиус: <b>{user['search_radius']} км</b>"
               if (user["search_scope"] == "near") else "")
+    notify = ("🔔 Напоминания включены" if user["notify_enabled"]
+              else "🔕 Напоминания выключены")
     return (
         f"{texts.SETTINGS_TITLE}\n\n"
         f"🎂 Возраст: <b>{user['age_min']}–{user['age_max']}</b>\n"
         f"🔍 Ищу: <b>{ {'m': 'парней', 'f': 'девушек'}.get(user['looking_for'], 'всех') }</b>\n"
         f"🌍 Город: <b>{place}</b>\n"
         f"🎯 Охват: <b>{scope}</b>{radius}\n"
-        f"{geo_line}"
+        f"{geo_line}\n{notify}"
     )
 
 
@@ -55,7 +57,8 @@ async def show(message: Message, state: FSMContext, user_id: int) -> None:
     await message.answer(
         render(user),
         reply_markup=kb.settings(user["search_scope"] or "city",
-                                 has_coords=user["geo_source"] == "gps"),
+                                 has_coords=user["geo_source"] == "gps",
+                                 notify_enabled=bool(user["notify_enabled"])),
     )
 
 
@@ -87,7 +90,8 @@ async def back(call: CallbackQuery, state: FSMContext, user) -> None:
     await call.message.edit_text(
         render(fresh),
         reply_markup=kb.settings(fresh["search_scope"] or "city",
-                                 has_coords=fresh["geo_source"] == "gps"),
+                                 has_coords=fresh["geo_source"] == "gps",
+                                 notify_enabled=bool(fresh["notify_enabled"])),
     )
 
 
@@ -227,6 +231,32 @@ async def set_city_by_name(message: Message, state: FSMContext, user,
         await users_repo.update_user(user["id"], search_scope="city")
     await message.answer(f"✅ {city.title}", reply_markup=rkb.REMOVE)
     await show(message, state, user["id"])
+
+
+# ──────────────────────────── Напоминания ───────────────────────────────────
+
+@router.callback_query(F.data == "st:notify")
+async def toggle_notifications(call: CallbackQuery, state: FSMContext, user) -> None:
+    fresh = await users_repo.get_user(user["id"])
+    enabled = not bool(fresh["notify_enabled"])
+    await users_repo.update_user(user["id"], notify_enabled=int(enabled),
+                                 notify_count=0)
+    await call.answer("Напоминания включены" if enabled else "Напоминания выключены")
+    await back(call, state, user)
+
+
+@router.callback_query(F.data == "remind:off")
+async def unsubscribe(call: CallbackQuery, user) -> None:
+    """Отписка прямо из напоминания — без захода в настройки."""
+    await users_repo.update_user(user["id"], notify_enabled=0)
+    await call.answer("Больше не напомню")
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await call.message.answer(
+        "🔕 Напоминания выключены. Включить обратно можно в ⚙️ Настройках поиска."
+    )
 
 
 # ──────────────────── Вернуть пропущенные анкеты ────────────────────────────

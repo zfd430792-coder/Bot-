@@ -38,15 +38,14 @@ async def start(message: Message, state: FSMContext, bot: Bot, user: Mapping[str
                 settings: Settings, is_admin: bool) -> None:
     await state.clear()
 
-    if user["registered"]:
-        await menu_handlers.show_main_menu(message, user, is_admin)
-        return
-
-    # Приём новых анкет можно приостановить из админ-панели
-    if not is_admin and await mod_repo.get_setting("registration_open", "1") != "1":
+    # Приём новых анкет можно приостановить из админ-панели.
+    # Проверяем до капчи: незачем гонять новичка через задание, если вход закрыт.
+    if (not user["registered"] and not is_admin
+            and await mod_repo.get_setting("registration_open", "1") != "1"):
         await message.answer(texts.REGISTRATION_CLOSED)
         return
 
+    # Капчу может сбросить антинакрутка, поэтому проверяем её и у давних анкет
     if not user["captcha_passed"]:
         blocked = await captcha_repo.blocked_seconds(user["id"])
         if blocked:
@@ -55,6 +54,10 @@ async def start(message: Message, state: FSMContext, bot: Bot, user: Mapping[str
             )
             return
         await issue_captcha(bot, message.chat.id, state, settings, intro=True)
+        return
+
+    if user["registered"]:
+        await menu_handlers.show_main_menu(message, user, is_admin)
         return
 
     if not user["rules_accepted"]:
@@ -153,7 +156,8 @@ async def captcha_refresh(call: CallbackQuery, state: FSMContext, bot: Bot,
 
 @router.callback_query(F.data == "cap:done", Onboarding.captcha)
 async def captcha_submit(call: CallbackQuery, state: FSMContext, bot: Bot,
-                         user: Mapping[str, Any], settings: Settings) -> None:
+                         user: Mapping[str, Any], settings: Settings,
+                         is_admin: bool) -> None:
     data = await state.get_data()
     selected = list(data.get("cap_selected") or [])
     correct = list(data.get("cap_correct") or [])
@@ -192,6 +196,15 @@ async def captcha_submit(call: CallbackQuery, state: FSMContext, bot: Bot,
     except TelegramBadRequest:
         pass
     await state.update_data(cap_msg=None)
+
+    if user["registered"]:
+        # Проверку сбросила антинакрутка — возвращаем человека в меню
+        await state.clear()
+        await menu_handlers.show_main_menu(
+            call.message, user, is_admin,
+            text="✅ Проверка пройдена. Продолжаем!",
+        )
+        return
     await send_welcome(call.message, state, user)
 
 
@@ -247,33 +260,35 @@ async def show_warning(call: CallbackQuery, state: FSMContext, bot: Bot,
         pass
 
     seconds = max(1, settings.rules_delay_seconds)
+    warning = texts.WARNING.format(min_age=settings.min_age)
     sent = await call.message.answer(
-        texts.WARNING + texts.WARNING_COUNTDOWN.format(sec=seconds)
+        warning + texts.WARNING_COUNTDOWN.format(sec=seconds)
     )
     await state.set_state(Onboarding.rules)
 
     task = asyncio.create_task(
-        _countdown(bot, sent.chat.id, sent.message_id, seconds)
+        _countdown(bot, sent.chat.id, sent.message_id, seconds, warning)
     )
     _countdown_tasks.add(task)
     task.add_done_callback(_countdown_tasks.discard)
 
 
-async def _countdown(bot: Bot, chat_id: int, message_id: int, seconds: int) -> None:
+async def _countdown(bot: Bot, chat_id: int, message_id: int, seconds: int,
+                     warning: str) -> None:
     """Тикает до нуля и только потом показывает кнопку «Принимаю»."""
     try:
         for left in range(seconds - 1, 0, -1):
             await asyncio.sleep(1)
             try:
                 await bot.edit_message_text(
-                    texts.WARNING + texts.WARNING_COUNTDOWN.format(sec=left),
+                    warning + texts.WARNING_COUNTDOWN.format(sec=left),
                     chat_id=chat_id, message_id=message_id,
                 )
             except TelegramBadRequest:
                 return  # сообщение удалено или пользователь ушёл дальше
         await asyncio.sleep(1)
         await bot.edit_message_text(
-            texts.WARNING, chat_id=chat_id, message_id=message_id,
+            warning, chat_id=chat_id, message_id=message_id,
             reply_markup=kb.RULES_ACCEPT,
         )
     except TelegramBadRequest:
