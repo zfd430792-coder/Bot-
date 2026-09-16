@@ -1,0 +1,443 @@
+"""Сквозной прогон бота без обращения к Telegram.
+
+Проходит весь путь: капча -> предупреждение -> анкета -> лента -> лайки ->
+совпадение -> жалоба -> админка -> верификация -> бан. Полезно запускать
+после любых правок: python3 tests/smoke_test.py
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+# Настройки задаём до импорта приложения
+TMP_DB = Path(tempfile.mkdtemp()) / "smoke.db"
+os.environ.update(
+    BOT_TOKEN="123456:TEST-TOKEN",
+    ADMIN_IDS="900001",
+    DB_PATH=str(TMP_DB),
+    THROTTLE_SECONDS="0",
+    RULES_DELAY_SECONDS="1",
+    CAPTCHA_MIN_SOLVE_MS="400",
+    CAPTCHA_MAX_ATTEMPTS="5",
+    LIKES_LIMIT_PER_DAY="50",
+)
+
+from aiogram import Bot, Dispatcher                                    # noqa: E402
+from aiogram.client.default import DefaultBotProperties                # noqa: E402
+from aiogram.enums import ParseMode                                    # noqa: E402
+from aiogram.fsm.storage.base import StorageKey                        # noqa: E402
+from aiogram.fsm.storage.memory import MemoryStorage                   # noqa: E402
+
+from app import handlers, middlewares                                  # noqa: E402
+from app.config import get_settings                                    # noqa: E402
+from app.db import moderation as mod_repo                              # noqa: E402
+from app.db import users as users_repo                                 # noqa: E402
+from app.db.database import db                                         # noqa: E402
+from tests.fake_telegram import (                                      # noqa: E402
+    FakeSession, callback_update, location_update, message_update,
+    photo_update, video_update,
+)
+
+ALICE, BOB, CAROL, ADMIN = 100001, 100002, 100003, 900001
+
+passed = failed = 0
+
+
+def check(condition: bool, label: str) -> None:
+    global passed, failed
+    if condition:
+        passed += 1
+        print(f"  ✅ {label}")
+    else:
+        failed += 1
+        print(f"  ❌ {label}")
+
+
+def section(title: str) -> None:
+    print(f"\n\033[1m{title}\033[0m")
+
+
+class Harness:
+    def __init__(self) -> None:
+        self.session = FakeSession()
+        self.bot = Bot(token=get_settings().bot_token, session=self.session,
+                       default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+        self.dp = Dispatcher(storage=MemoryStorage())
+        middlewares.setup(self.dp, get_settings())
+        handlers.setup(self.dp)
+
+    async def feed(self, update) -> None:
+        await self.dp.feed_update(self.bot, update)
+
+    async def text(self, user_id: int, value: str, **kwargs) -> None:
+        await self.feed(message_update(self.bot, user_id, value, **kwargs))
+
+    async def click(self, user_id: int, data: str, **kwargs) -> None:
+        await self.feed(callback_update(self.bot, user_id, data, **kwargs))
+
+    async def photo(self, user_id: int) -> None:
+        await self.feed(photo_update(self.bot, user_id))
+
+    async def state_data(self, user_id: int) -> dict:
+        key = StorageKey(bot_id=self.bot.id, chat_id=user_id, user_id=user_id)
+        return await self.dp.storage.get_data(key)
+
+    def said(self, needle: str) -> bool:
+        return any(needle.lower() in t.lower() for t in self.session.texts())
+
+    def clear(self) -> None:
+        self.session.clear()
+
+
+async def solve_captcha(h: Harness, user_id: int, *, correctly: bool = True,
+                        wait: bool = True) -> None:
+    """Читает правильный ответ из состояния — так может только тест, не бот."""
+    if wait:
+        await asyncio.sleep(0.5)
+    data = await h.state_data(user_id)
+    tokens: dict[str, int] = data["cap_tokens"]
+    correct = set(data["cap_correct"])
+    target = correct if correctly else ({1, 2, 3} - correct or {max(tokens.values())})
+    for token, label in tokens.items():
+        if label in target:
+            await h.click(user_id, f"cap:tok:{token}")
+    await h.click(user_id, "cap:done")
+
+
+async def register(h: Harness, user_id: int, *, gender: str, looking: str,
+                   age: str, name: str, city: str) -> None:
+    await h.text(user_id, "/start")
+    await solve_captcha(h, user_id)
+    await h.click(user_id, "onb:next")
+    await asyncio.sleep(get_settings().rules_delay_seconds + 0.4)
+    await h.click(user_id, "onb:accept")
+    await h.click(user_id, f"reg:gender:{gender}")
+    await h.click(user_id, f"reg:look:{looking}")
+    await h.text(user_id, age)
+    await h.text(user_id, name)
+    await h.photo(user_id)
+    await h.text(user_id, "Люблю горы, кофе и долгие разговоры.")
+    await h.text(user_id, city)
+    await h.click(user_id, "reg:scope:city")
+    await h.click(user_id, "reg:confirm")
+
+
+async def main() -> int:
+    await db.connect(get_settings().db_path)
+    h = Harness()
+
+    # ── 1. Проверка username ────────────────────────────────────────────────
+    section("1. Доступ без username")
+    await h.text(CAROL, "/start", username=None)
+    check(h.said("Нужен username"), "без @username бот не пускает")
+    h.clear()
+
+    # ── 2. Капча ────────────────────────────────────────────────────────────
+    section("2. Капча")
+    await h.text(ALICE, "/start")
+    check(h.session.of_type("SendPhoto"), "капча приходит картинкой")
+    check(h.said("выберите"), "задание сформулировано текстом")
+    h.clear()
+
+    await solve_captcha(h, ALICE, correctly=True, wait=False)
+    check(h.said("Слишком быстро"), "мгновенный ответ отбивается как ботовский")
+    h.clear()
+
+    await solve_captcha(h, ALICE, correctly=False)
+    check(h.said("Неверно"), "неправильный набор клеток не проходит")
+    user = await users_repo.get_user(ALICE)
+    check(user["captcha_passed"] == 0, "после ошибки капча не засчитана")
+    h.clear()
+
+    await solve_captcha(h, ALICE, correctly=True)
+    user = await users_repo.get_user(ALICE)
+    check(user["captcha_passed"] == 1, "верный ответ проходит проверку")
+    check(h.said("Привет"), "после капчи появляется приветствие")
+    check(any("onb:next" in str(getattr(c, "reply_markup", ""))
+              for c in h.session.calls), "под приветствием кнопка «Далее»")
+    h.clear()
+
+    # ── 3. Предупреждение с задержкой ───────────────────────────────────────
+    section("3. Предупреждение о мошенниках")
+    await h.click(ALICE, "onb:next")
+    check(h.session.of_type("DeleteMessage"), "приветствие удаляется")
+    check(h.said("мошенник"), "показано предупреждение")
+    check(h.said("Кнопка появится через"), "идёт обратный отсчёт")
+    accept_before = any(
+        "onb:accept" in str(getattr(c, "reply_markup", "")) for c in h.session.calls
+    )
+    check(not accept_before, "кнопки «Принимаю» ещё нет")
+
+    await asyncio.sleep(get_settings().rules_delay_seconds + 0.5)
+    accept_after = any(
+        "onb:accept" in str(getattr(c, "reply_markup", "")) for c in h.session.calls
+    )
+    check(accept_after, "через паузу появилась кнопка «Принимаю»")
+    h.clear()
+
+    await h.click(ALICE, "onb:accept")
+    user = await users_repo.get_user(ALICE)
+    check(user["rules_accepted"] == 1, "согласие с правилами сохранено")
+    check(h.said("Ваш пол"), "сразу начинается анкета")
+    h.clear()
+
+    # ── 4. Анкета ───────────────────────────────────────────────────────────
+    section("4. Заполнение анкеты")
+    await h.click(ALICE, "reg:gender:f")
+    await h.click(ALICE, "reg:look:m")
+    await h.text(ALICE, "семнадцать")
+    check(h.said("Введите возраст числом"), "возраст словами не принимается")
+    await h.text(ALICE, "16")
+    check(h.said("только совершеннолетним"), "младше 18 не пускает")
+    await h.text(ALICE, "26")
+    await h.text(ALICE, "http://spam.example")
+    check(h.said("Имя должно быть"), "ссылку вместо имени не берём")
+    await h.text(ALICE, "Алиса")
+    h.clear()
+
+    await h.feed(video_update(h.bot, ALICE, duration=40))
+    check(h.said("длиннее"), "видео длиннее 15 секунд отклоняется")
+    await h.feed(video_update(h.bot, ALICE, duration=12))
+    user = await users_repo.get_user(ALICE)
+    check(user["media_type"] == "video", "короткое видео принято")
+    h.clear()
+
+    await h.text(ALICE, "Захожу сюда за живым общением. Пишите: t.me/spamchannel")
+    check(h.said("нельзя оставлять ссылки"), "ссылки в описании блокируются")
+    await h.text(ALICE, "Люблю книги, горы и настолки.")
+    check(h.said("Откуда вы"), "дальше спрашивается город")
+    h.clear()
+
+    await h.text(ALICE, "Урюпинск")
+    check(h.said("Не нашёл такой город"), "незнакомый город честно не найден")
+    check(h.said("область"), "предложен запасной путь через область")
+    await h.text(ALICE, "Волгоградская область")
+    user = await users_repo.get_user(ALICE)
+    check(user["region"] == "Волгоградская область", "область определена")
+    check(user["lat"] is not None, "координаты области подставлены")
+    h.clear()
+
+    await h.click(ALICE, "reg:scope:region")
+    check(h.said("Вот как её увидят другие"), "показан предпросмотр анкеты")
+    await h.click(ALICE, "reg:confirm")
+    user = await users_repo.get_user(ALICE)
+    check(user["registered"] == 1 and user["is_active"] == 1, "анкета опубликована")
+    check(user["age_min"] == 21 and user["age_max"] == 31,
+          "возрастные рамки поиска выставлены по умолчанию")
+    h.clear()
+
+    # ── 5. Второй пользователь и геопозиция ─────────────────────────────────
+    section("5. Второй пользователь и поиск по геопозиции")
+    await h.text(BOB, "/start")
+    await solve_captcha(h, BOB)
+    await h.click(BOB, "onb:next")
+    await asyncio.sleep(get_settings().rules_delay_seconds + 0.4)
+    await h.click(BOB, "onb:accept")
+    await h.click(BOB, "reg:gender:m")
+    await h.click(BOB, "reg:look:f")
+    await h.text(BOB, "28")
+    await h.text(BOB, "Борис")
+    await h.photo(BOB)
+    await h.text(BOB, "Инженер, играю на гитаре.")
+    h.clear()
+
+    await h.feed(location_update(h.bot, BOB, 48.71, 44.51))   # Волгоград
+    user = await users_repo.get_user(BOB)
+    check(user["city"] == "Волгоград", "город определён по геопозиции")
+    check(user["geo_source"] == "gps", "источник координат — геопозиция")
+    check(abs(user["lat"] - 48.71) < 0.02, "координаты сдвинуты лишь незначительно")
+    check(h.said("Геопозиция принята"), "пользователю подтвердили приём")
+    h.clear()
+
+    await h.click(BOB, "reg:scope:near")
+    await h.click(BOB, "reg:confirm")
+    user = await users_repo.get_user(BOB)
+    check(user["search_scope"] == "near", "включён поиск по расстоянию")
+
+    # ── 6. Лента и совпадение ───────────────────────────────────────────────
+    section("6. Лента, лайки и совпадение")
+    h.clear()
+    await h.text(BOB, "🔍 Смотреть анкеты")
+    check(h.said("Алиса"), "Борису показана анкета Алисы")
+    check(h.said("км от вас"), "в режиме «рядом» показано расстояние")
+    h.clear()
+
+    await h.click(BOB, f"br:like:{ALICE}")
+    check(await users_repo.count_incoming_likes(ALICE) == 1, "лайк дошёл до Алисы")
+    check(h.said("понравились"), "Алисе пришло уведомление о симпатии")
+    h.clear()
+
+    await h.text(ALICE, "🔍 Смотреть анкеты")
+    check(h.said("Борис"), "Алисе показан Борис")
+    h.clear()
+    await h.click(ALICE, f"br:like:{BOB}")
+    check(h.said("Взаимная симпатия"), "сработало совпадение")
+    check(h.said("@tester"), "выданы контакты для переписки")
+    matches = await users_repo.get_matches(ALICE)
+    check(len(matches) == 1, "совпадение сохранено в базе")
+    h.clear()
+
+    # ── 7. Лимит лайков ─────────────────────────────────────────────────────
+    section("7. Лимит лайков")
+    await mod_repo.set_setting("likes_limit", "1")
+    await users_repo.update_user(CAROL, username="carol")
+    await register(h, CAROL, gender="f", looking="m", age="24",
+                   name="Карина", city="Волгоград")
+    h.clear()
+    await h.text(BOB, "🔍 Смотреть анкеты")
+    await h.click(BOB, f"br:like:{CAROL}")
+    check(h.said("Лимит лайков на сегодня исчерпан"), "лимит лайков срабатывает")
+    check(not await users_repo.get_matches(CAROL), "лайк сверх лимита не засчитан")
+    await mod_repo.set_setting("likes_limit", "50")
+    h.clear()
+
+    # ── 8. Жалоба ───────────────────────────────────────────────────────────
+    section("8. Жалоба на анкету")
+    await h.text(ALICE, "🔍 Смотреть анкеты")
+    h.clear()
+    await h.click(ALICE, f"br:report:{CAROL}")
+    check(h.said("На что жалуемся"), "предложены причины жалобы")
+    await h.click(ALICE, f"rep:scam:{CAROL}")
+    await h.text(ALICE, "Просит перевести деньги на карту")
+    check(h.said("Жалоба отправлена"), "жалоба принята")
+    admin_texts = [c for c in h.session.calls
+                   if getattr(c, "chat_id", None) == ADMIN]
+    check(bool(admin_texts), "жалоба ушла администратору")
+    check(await mod_repo.count_open_reports() == 1, "жалоба записана в базу")
+    h.clear()
+
+    # ── 9. Админ-панель ─────────────────────────────────────────────────────
+    section("9. Админ-панель")
+    await h.text(ADMIN, "/admin", username="boss")
+    check(h.said("Админ-панель"), "панель открывается")
+    h.clear()
+    await h.click(ADMIN, "adm:stats", username="boss")
+    check(h.said("Статистика бота"), "статистика собирается")
+    check(h.said("Совпадений"), "в статистике есть совпадения")
+    h.clear()
+    await h.text(ADMIN, f"/find {CAROL}", username="boss")
+    check(h.said("Карина"), "поиск пользователя работает")
+    h.clear()
+
+    await h.click(ADMIN, "adm:cfg", username="boss")
+    await h.click(ADMIN, "adm:set:registration", username="boss")
+    check(await mod_repo.get_setting("registration_open") == "0",
+          "приём новых анкет закрыт")
+    h.clear()
+    await h.text(999123, "/start", username="newbie")
+    check(h.said("Регистрация временно приостановлена"),
+          "новичок не может начать регистрацию")
+    await h.click(ADMIN, "adm:set:registration", username="boss")
+    check(await mod_repo.get_setting("registration_open") == "1",
+          "приём анкет снова открыт")
+    h.clear()
+
+    # ── 10. Верификация по требованию админа ────────────────────────────────
+    section("10. Принудительная верификация")
+    await h.click(ADMIN, f"adm:req_verify:{CAROL}", username="boss")
+    user = await users_repo.get_user(CAROL)
+    check(user["verify_forced"] == 1, "требование верификации выставлено")
+    code = user["verify_code"]
+    h.clear()
+
+    await h.text(CAROL, "🔍 Смотреть анкеты")
+    check(h.said("Требуется верификация"), "до проверки бот закрыт")
+    check(h.said(code), "пользователю показан код для фото")
+    h.clear()
+
+    candidates = await users_repo.search_candidates(await users_repo.get_user(BOB))
+    check(all(c["id"] != CAROL for c in candidates),
+          "анкета на проверке скрыта из поиска")
+
+    await h.click(CAROL, "ver:start")
+    await h.photo(CAROL)
+    check(h.said("Заявка отправлена"), "фото проверки принято")
+    verifications = await mod_repo.pending_verifications()
+    check(len(verifications) == 1, "заявка ждёт админа")
+    h.clear()
+
+    await h.click(ADMIN, f"vrf:ok:{verifications[0]['id']}", username="boss")
+    user = await users_repo.get_user(CAROL)
+    check(user["verify_status"] == "verified", "верификация подтверждена")
+    check(user["verify_forced"] == 0, "блокировка снята")
+    h.clear()
+    await h.text(CAROL, "👤 Моя анкета")
+    check(h.said("☑️"), "в анкете появилась галочка")
+    h.clear()
+
+    # ── 11. Бан и разбан ────────────────────────────────────────────────────
+    section("11. Бан и разбан")
+    await h.text(ADMIN, f"/ban {CAROL} 2d спам в анкете", username="boss")
+    user = await users_repo.get_user(CAROL)
+    check(user["is_banned"] == 1, "пользователь забанен")
+    check(user["banned_until"] is not None, "срок бана записан")
+    check(h.said("Доступ заблокирован"), "пользователь уведомлён")
+    h.clear()
+
+    await h.text(CAROL, "🔍 Смотреть анкеты")
+    check(h.said("Доступ заблокирован"), "забаненный не может пользоваться ботом")
+    h.clear()
+
+    await h.text(ADMIN, f"/unban {CAROL}", username="boss")
+    user = await users_repo.get_user(CAROL)
+    check(user["is_banned"] == 0, "бан снят")
+    h.clear()
+
+    # ── 12. Рассылка ────────────────────────────────────────────────────────
+    section("12. Рассылка")
+    await h.click(ADMIN, "adm:bc", username="boss")
+    await h.click(ADMIN, "adm:bc_aud:registered", username="boss")
+    check(h.said("Получателей"), "аудитория посчитана")
+    await h.text(ADMIN, "Привет! У нас новые анкеты 🎉", username="boss")
+    check(h.said("Так это увидят люди"), "показан предпросмотр")
+    h.clear()
+    await h.click(ADMIN, "adm:bc_go", username="boss")
+    await asyncio.sleep(1.0)
+    copies = h.session.of_type("CopyMessage")
+    check(len(copies) >= 3, f"сообщения разосланы ({len(copies)} шт.)")
+    row = await db.fetchone("SELECT * FROM broadcasts ORDER BY id DESC LIMIT 1")
+    check(row is not None and row["total"] >= 3, "рассылка записана в журнал")
+    h.clear()
+
+    # ── 13. Настройки поиска ────────────────────────────────────────────────
+    section("13. Настройки поиска")
+    await h.text(BOB, "⚙️ Настройки поиска")
+    check(h.said("Настройки поиска"), "настройки открываются")
+    h.clear()
+    await h.click(BOB, "st:age")
+    await h.text(BOB, "20-45")
+    user = await users_repo.get_user(BOB)
+    check(user["age_min"] == 20 and user["age_max"] == 45, "возрастные рамки сохранены")
+    await h.click(BOB, "st:radius:100")
+    user = await users_repo.get_user(BOB)
+    check(user["search_radius"] == 100, "радиус поиска сохранён")
+    h.clear()
+
+    # ── 14. Скрытие и удаление анкеты ───────────────────────────────────────
+    section("14. Управление анкетой")
+    await h.click(ALICE, "pr:hide")
+    user = await users_repo.get_user(ALICE)
+    check(user["is_active"] == 0, "анкета скрыта из поиска")
+    await h.click(ALICE, "pr:show")
+    user = await users_repo.get_user(ALICE)
+    check(user["is_active"] == 1, "анкета снова видна")
+    h.clear()
+    await h.click(ALICE, "pr:delete")
+    await h.click(ALICE, "pr:delete_yes")
+    user = await users_repo.get_user(ALICE)
+    check(user["registered"] == 0 and user["name"] is None, "анкета удалена")
+    check(not await users_repo.get_matches(BOB), "совпадения удалённого убраны")
+
+    await db.close()
+    print(f"\n\033[1mИтог: {passed} успешно, {failed} с ошибкой\033[0m")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))
