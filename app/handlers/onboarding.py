@@ -307,8 +307,9 @@ async def accept_rules(call: CallbackQuery, state: FSMContext, bot: Bot,
                        user: Mapping[str, Any], settings: Settings) -> None:
     await users_repo.update_user(user["id"], rules_accepted=1)
     await call.answer(texts.RULES_ACCEPTED)
+    # Предупреждение прочитано и принято — убираем, чтобы не висело над анкетой
     try:
-        await call.message.edit_reply_markup(reply_markup=None)
+        await call.message.delete()
     except TelegramBadRequest:
         pass
 

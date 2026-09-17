@@ -54,6 +54,7 @@ ALICE, BOB, CAROL, ADMIN = 100001, 100002, 100003, 900001
 DAVE, EVE, FRANK = 100004, 100005, 100006
 GLEB, HELEN, MOD1, MOD2 = 100007, 100008, 100009, 100010
 NINA, OLEG = 100011, 100012
+SCREEN = 100013
 EXTRAS = list(range(200001, 200009))        # массовка для ленты
 
 passed = failed = 0
@@ -86,8 +87,11 @@ class Harness:
     async def feed(self, update) -> None:
         await self.dp.feed_update(self.bot, update)
 
-    async def text(self, user_id: int, value: str, **kwargs) -> None:
-        await self.feed(message_update(self.bot, user_id, value, **kwargs))
+    async def text(self, user_id: int, value: str, **kwargs) -> int:
+        """Возвращает id отправленного сообщения — чтобы проверять его удаление."""
+        update = message_update(self.bot, user_id, value, **kwargs)
+        await self.feed(update)
+        return update.message.message_id
 
     async def click(self, user_id: int, data: str, **kwargs) -> None:
         await self.feed(callback_update(self.bot, user_id, data, **kwargs))
@@ -916,6 +920,55 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     )
     rows = await reengagement.candidates(cfg)
     check(not any(r["id"] == ADMIN for r in rows), "владельцу напоминания не приходят")
+
+    # ── 24. Анкета живёт одним экраном ──────────────────────────────────────
+    section("24. Один экран вместо простыни сообщений")
+    await users_repo.ensure_user(SCREEN, "screenuser", "Экран")
+    await users_repo.update_user(SCREEN, captcha_passed=1, rules_accepted=1)
+    h.clear()
+
+    await h.text(SCREEN, "/start", username="screenuser")
+    await h.click(SCREEN, "reg:gender:m", username="screenuser")
+    await h.click(SCREEN, "reg:look:f", username="screenuser")
+
+    bad_age = await h.text(SCREEN, "не число", username="screenuser")
+    deleted = {c.message_id for c in h.session.of_type("DeleteMessage")}
+    check(bad_age in deleted, "неверный ответ пользователя удаляется")
+    check(h.said("Введите возраст числом"), "ошибка показана в том же экране")
+
+    good_age = await h.text(SCREEN, "30", username="screenuser")
+    name_msg = await h.text(SCREEN, "Экранов", username="screenuser")
+    deleted = {c.message_id for c in h.session.of_type("DeleteMessage")}
+    check(good_age in deleted and name_msg in deleted,
+          "верные ответы пользователя тоже удаляются")
+
+    await h.photo(SCREEN)
+    about_msg = await h.text(SCREEN, "Проверяю чистоту чата", username="screenuser")
+    city_msg = await h.text(SCREEN, "Казань", username="screenuser")
+    deleted = {c.message_id for c in h.session.of_type("DeleteMessage")}
+    check(about_msg in deleted and city_msg in deleted,
+          "описание и город тоже не остаются в чате")
+
+    sent = len([c for c in h.session.calls
+                if type(c).__name__ == "SendMessage"
+                and getattr(c, "chat_id", None) == SCREEN])
+    removed = len([c for c in h.session.of_type("DeleteMessage")
+                   if getattr(c, "chat_id", None) == SCREEN])
+    check(removed >= sent - 3,
+          f"бот убирает за собой: отправлено {sent}, удалено {removed}")
+
+    progress_shown = any("Экранов" in (getattr(c, "text", "") or "")
+                         for c in h.session.calls)
+    check(progress_shown, "заполненное видно строкой прогресса, а не сообщениями")
+    h.clear()
+
+    await h.click(SCREEN, "reg:scope:city", username="screenuser")
+    check(h.said("Вот как её увидят другие"), "предпросмотр показан")
+    await h.click(SCREEN, "reg:confirm", username="screenuser")
+    preview_removed = bool(h.session.of_type("DeleteMessage"))
+    check(preview_removed, "после подтверждения предпросмотр убирается")
+    check((await users_repo.get_user(SCREEN))["registered"] == 1,
+          "анкета опубликована")
 
     print(f"\n\033[1mИтог: {passed} успешно, {failed} с ошибкой\033[0m")
     return 1 if failed else 0
