@@ -45,11 +45,19 @@ warn()  { printf '      %s!%s  %s\n' "$YELLOW" "$OFF" "$1"; }
 info()  { printf '      %s•%s  %s\n' "$BLUE" "$OFF" "$1"; }
 hint()  { printf '         %s%s%s\n' "$DIM" "$1" "$OFF"; }
 
+# Показываем хвост лога сразу: отправлять человека читать файл — лишний шаг
+show_log_tail() {
+    [ -s "$LOG_FILE" ] || return 0
+    printf '\n      %sЧто именно пошло не так:%s\n' "$DIM" "$OFF"
+    tail -n 15 "$LOG_FILE" | sed 's/^/        /'
+}
+
 die() {
     printf '\n%s%s%s\n' "$RED" "$RULE" "$OFF"
     fail "$1"
     shift
     for line in "$@"; do hint "$line"; done
+    show_log_tail
     printf '\n      %sПолный лог:%s %s\n\n' "$DIM" "$OFF" "$LOG_FILE"
     exit 1
 }
@@ -117,13 +125,20 @@ ok "$("$PYTHON" --version)"
 
 # 3. Окружение и зависимости
 step 3 "Зависимости"
+PY_VER=$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+
 if [ -d ".venv" ]; then
     ok "Виртуальное окружение уже есть"
 else
-    spin "Создаю виртуальное окружение…" "$PYTHON" -m venv .venv
-    [ -d ".venv" ] || die "Не удалось создать виртуальное окружение." \
-        "Скорее всего не хватает пакета venv:" \
-        "sudo apt install python3-venv"
+    # Важно проверять именно код возврата: при отсутствии ensurepip папка
+    # .venv создаётся, но остаётся без pip — и «успех» был бы обманом
+    if ! spin "Создаю виртуальное окружение…" "$PYTHON" -m venv .venv; then
+        rm -rf .venv
+        die "Не удалось создать виртуальное окружение." \
+            "Не хватает пакета venv. На Debian/Ubuntu:" \
+            "apt update && apt install -y python3-venv python${PY_VER}-venv" \
+            "Затем просто запустите установку заново: bash install.sh"
+    fi
     ok "Виртуальное окружение создано"
 fi
 
@@ -132,12 +147,33 @@ VENV_PY=".venv/bin/python"
 [ -x "$VENV_PY" ] || die "Внутри .venv нет интерпретатора." \
     "Удалите папку .venv и запустите установку заново."
 
-spin "Обновляю pip…" "$VENV_PY" -m pip install --upgrade pip
-spin "Ставлю библиотеки (aiogram, Pillow, redis)…" \
-    "$VENV_PY" -m pip install -r requirements.txt
-"$VENV_PY" -c "import aiogram, PIL, redis, aiosqlite" >>"$LOG_FILE" 2>&1 \
-    || die "Библиотеки установились не полностью." \
-           "Посмотрите лог — обычно не хватает компилятора или доступа в сеть."
+# Частый случай на свежих серверах: окружение создалось, а pip в нём нет
+if ! "$VENV_PY" -m pip --version >>"$LOG_FILE" 2>&1; then
+    die "В виртуальном окружении нет pip." \
+        "Не хватает пакета venv. На Debian/Ubuntu:" \
+        "apt update && apt install -y python3-venv python${PY_VER}-venv" \
+        "Затем: rm -rf .venv && bash install.sh"
+fi
+
+if ! spin "Обновляю pip…" "$VENV_PY" -m pip install --upgrade pip; then
+    die "Не удалось обновить pip." \
+        "Если в логе ошибки сети — проверьте доступ: curl -I https://pypi.org" \
+        "Если pip вообще не найден: sudo apt install -y python3-pip"
+fi
+
+if ! spin "Ставлю библиотеки (aiogram, Pillow, redis)…" \
+        "$VENV_PY" -m pip install -r requirements.txt; then
+    die "Не удалось установить библиотеки." \
+        "Ошибки сборки — поставьте компилятор и заголовки:" \
+        "sudo apt install -y build-essential python3-dev zlib1g-dev libjpeg-dev" \
+        "Ошибки сети — проверьте доступ: curl -I https://pypi.org" \
+        "Кончилось место — проверьте: df -h /"
+fi
+
+if ! "$VENV_PY" -c "import aiogram, PIL, redis, aiosqlite" >>"$LOG_FILE" 2>&1; then
+    die "Библиотеки установились, но не импортируются." \
+        "Удалите окружение и повторите: rm -rf .venv && bash install.sh"
+fi
 ok "Библиотеки на месте"
 
 # 4. Настройка
