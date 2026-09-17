@@ -274,8 +274,10 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     check(h.said("Минимальный возраст"), "младше настроенного минимума не пускает")
     await h.text(ALICE, "26")
     await h.text(ALICE, "http://spam.example")
-    check(h.said("Имя должно быть"), "ссылку вместо имени не берём")
-    await h.text(ALICE, "Алиса")
+    check(h.said("Не получилось разобрать имя"), "ссылку вместо имени не берём")
+    await h.text(ALICE, "Алиса 🌸✨")
+    check((await users_repo.get_user(ALICE))["name"] == "Алиса",
+          "эмодзи из имени вырезаются, а не ломают шаг")
     h.clear()
 
     await h.feed(video_update(h.bot, ALICE, duration=40))

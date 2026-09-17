@@ -54,7 +54,9 @@ LOOKING_FOR = _kb([
     [_btn("💞 Неважно — всех", "reg:look:any")],
 ])
 SKIP_ABOUT = _kb([[_btn("⏭ Пропустить", "reg:skip_about")]])
-USE_TG_NAME = _kb([[_btn("Использовать имя из Telegram", "reg:tgname")]])
+def use_tg_name(name: str) -> InlineKeyboardMarkup:
+    """Показываем прямо на кнопке, какое имя подставится."""
+    return _kb([[_btn(f"Использовать «{name}»", "reg:tgname")]])
 
 
 def city_choices(cities, prefix: str = "reg") -> InlineKeyboardMarkup:

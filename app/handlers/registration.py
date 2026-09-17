@@ -30,7 +30,11 @@ from app.states import Registration
 router = Router(name="registration")
 
 LINK_RE = re.compile(r"(https?://|www\.|t\.me/|@[a-zA-Z0-9_]{4,}|telegram\.me)", re.I)
-NAME_RE = re.compile(r"^[a-zA-Zа-яА-ЯёЁ0-9 \-'’.]+$")
+
+# В имени оставляем буквы любого алфавита: среди пользователей есть Айгүл,
+# Олексій и Ա — отвергать их имена целиком было бы дико. Эмодзи и прочие
+# украшения просто убираем, а не заставляем человека переписывать имя.
+NAME_EXTRA_CHARS = " -'’."
 
 GENDER_TITLE = {"m": "парень", "f": "девушка"}
 
@@ -88,9 +92,14 @@ async def ask_age(bot: Bot, chat_id: int, state: FSMContext,
 
 
 async def ask_name(bot: Bot, chat_id: int, state: FSMContext,
+                   settings: Settings, tg_name: str = "",
                    error: str | None = None) -> None:
     await state.set_state(Registration.name)
-    await _step(bot, chat_id, state, texts.REG_NAME, kb.USE_TG_NAME, error)
+    # Предлагаем имя из Telegram, только если им реально можно пользоваться:
+    # кнопка, которая всегда отвечает «не подходит», хуже её отсутствия
+    suggestion = validate_name(tg_name, settings)
+    markup = kb.use_tg_name(suggestion) if suggestion else None
+    await _step(bot, chat_id, state, texts.REG_NAME, markup, error)
 
 
 async def ask_media(bot: Bot, chat_id: int, state: FSMContext,
@@ -182,7 +191,8 @@ async def resume(message: Message, state: FSMContext, user: Mapping[str, Any],
     elif not user["age"]:
         await ask_age(bot, chat_id, state)
     elif not user["name"]:
-        await ask_name(bot, chat_id, state)
+        await ask_name(bot, chat_id, state, settings,
+                       message.from_user.first_name or "")
     elif not user["media_id"]:
         await ask_media(bot, chat_id, state, settings)
     elif user["about"] is None:
@@ -248,16 +258,27 @@ async def set_age(message: Message, state: FSMContext, user, settings: Settings)
         age_min=max(settings.min_age, age - 5),
         age_max=min(settings.max_age, age + 5),
     )
-    await ask_name(bot, chat_id, state)
+    await ask_name(bot, chat_id, state, settings,
+                   message.from_user.first_name or "")
 
 
 # ─────────────────────────── Шаг 4: имя ─────────────────────────────────────
 
+def clean_name(raw: str) -> str:
+    """Убирает из имени эмодзи и украшения, сохраняя буквы любого языка."""
+    kept = [
+        char for char in (raw or "")
+        if char.isalpha() or char.isdigit() or char in NAME_EXTRA_CHARS
+    ]
+    return " ".join("".join(kept).split())
+
+
 def validate_name(raw: str, settings: Settings) -> str | None:
-    name = " ".join((raw or "").split())
-    if not (settings.name_min_len <= len(name) <= settings.name_max_len):
+    """Приводит имя к пригодному виду. None — использовать нельзя вообще."""
+    if LINK_RE.search(raw or ""):
         return None
-    if LINK_RE.search(name) or not NAME_RE.match(name):
+    name = clean_name(raw)[:settings.name_max_len].strip(NAME_EXTRA_CHARS)
+    if len(name) < settings.name_min_len:
         return None
     return name
 
@@ -265,10 +286,13 @@ def validate_name(raw: str, settings: Settings) -> str | None:
 @router.callback_query(F.data == "reg:tgname", Registration.name)
 async def use_tg_name(call: CallbackQuery, state: FSMContext, user,
                       settings: Settings) -> None:
-    name = validate_name((call.from_user.first_name or "").strip(), settings)
+    name = validate_name(call.from_user.first_name or "", settings)
     if not name:
-        await call.answer("Имя из Telegram не подходит — напишите вручную",
+        # Сюда попасть почти невозможно: кнопку показываем только с пригодным
+        # именем. Оставлено на случай, если имя поменяли между шагами.
+        await call.answer("Это имя не подходит — напишите его вручную",
                           show_alert=True)
+        await ask_name(call.bot, call.message.chat.id, state, settings)
         return
     await users_repo.update_user(user["id"], name=name)
     await call.answer()
@@ -280,7 +304,8 @@ async def set_name(message: Message, state: FSMContext, user, settings: Settings
     await screen.drop(message)
     name = validate_name(message.text or "", settings)
     if not name:
-        await ask_name(message.bot, message.chat.id, state,
+        await ask_name(message.bot, message.chat.id, state, settings,
+                       message.from_user.first_name or "",
                        texts.REG_NAME_BAD.format(min_len=settings.name_min_len,
                                                  max_len=settings.name_max_len))
         return
