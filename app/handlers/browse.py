@@ -33,6 +33,20 @@ async def _likes_limit(settings: Settings) -> int:
     return await mod_repo.get_int_setting("likes_limit", settings.likes_limit_per_day)
 
 
+async def _like_is_free(user_id: int, target_id: int, settings: Settings) -> bool:
+    """Лайк не тратит суточный лимит в двух случаях.
+
+    1. Человека уже лайкнули — тогда его ❤️ это ответ на чужую симпатию,
+       а не рассылка. Запрещать отвечать бессмысленно: он ничего не ищет,
+       он решает, отвечать взаимностью или нет. Злоупотребить нельзя —
+       бесплатно лайкнуть можно только того, кто лайкнул первым.
+    2. Лайкает владелец бота: на админов ограничения не действуют.
+    """
+    if settings.is_admin(user_id):
+        return True
+    return await reactions_repo.liked_me(user_id, target_id)
+
+
 def _with_distance(row: Mapping[str, Any], viewer: Mapping[str, Any]) -> dict:
     data = dict(row)
     data["distance"] = haversine(viewer["lat"], viewer["lon"], row["lat"], row["lon"])
@@ -68,7 +82,10 @@ async def show_next(bot: Bot, chat_id: int, state: FSMContext,
         ads_seen = int(data.get("ads_seen", 0)) + 1
         ad_messages, ads_seen = await ads_service.maybe_send(bot, chat_id, ads_seen)
 
-        left = await users_repo.likes_left(fresh_viewer, await _likes_limit(settings))
+        free = await _like_is_free(user["id"], target_id, settings)
+        left = (None if free
+                else await users_repo.likes_left(fresh_viewer,
+                                                 await _likes_limit(settings)))
         card = _with_distance(target, fresh_viewer)
         note = (await reactions_repo.get_note(target_id, user["id"])
                 if mode == "likes" else None)
@@ -160,7 +177,8 @@ async def like(call: CallbackQuery, state: FSMContext, bot: Bot,
     target_id = int((call.data or "0").split(":")[-1])
     limit = await _likes_limit(settings)
 
-    if not await users_repo.consume_like(user["id"], limit):
+    free = await _like_is_free(user["id"], target_id, settings)
+    if not free and not await users_repo.consume_like(user["id"], limit):
         await call.answer("Лимит лайков на сегодня исчерпан", show_alert=True)
         await call.message.answer(texts.LIKE_LIMIT_REACHED.format(limit=limit, hours=24))
         return
@@ -190,7 +208,8 @@ async def ask_note(call: CallbackQuery, state: FSMContext, user: Mapping[str, An
     target_id = int((call.data or "0").split(":")[-1])
     limit = await _likes_limit(settings)
     fresh = await users_repo.get_user(user["id"])
-    if await users_repo.likes_left(fresh, limit) <= 0:
+    free = await _like_is_free(user["id"], target_id, settings)
+    if not free and await users_repo.likes_left(fresh, limit) <= 0:
         await call.answer("Лимит лайков на сегодня исчерпан", show_alert=True)
         await call.message.answer(texts.LIKE_LIMIT_REACHED.format(limit=limit, hours=24))
         return
@@ -238,7 +257,8 @@ async def send_note(message: Message, state: FSMContext, bot: Bot,
         return
 
     limit = await _likes_limit(settings)
-    if not await users_repo.consume_like(user["id"], limit):
+    free = await _like_is_free(user["id"], target_id, settings)
+    if not free and not await users_repo.consume_like(user["id"], limit):
         await state.set_state(Browsing.feed)
         await message.answer(texts.LIKE_LIMIT_REACHED.format(limit=limit, hours=24))
         return
@@ -273,8 +293,10 @@ async def note_hint(message: Message, settings: Settings) -> None:
 async def answer_like(call: CallbackQuery, bot: Bot, user: Mapping[str, Any],
                       settings: Settings) -> None:
     sender_id = int((call.data or "0").split(":")[-1])
+    # Это ответ на чужой лайк — лимит здесь не при чём
+    free = await _like_is_free(user["id"], sender_id, settings)
     limit = await _likes_limit(settings)
-    if not await users_repo.consume_like(user["id"], limit):
+    if not free and not await users_repo.consume_like(user["id"], limit):
         await call.answer("Лимит лайков на сегодня исчерпан", show_alert=True)
         return
 

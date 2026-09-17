@@ -200,6 +200,10 @@ async def request_verify(call: CallbackQuery, bot: Bot) -> None:
     code = await verification_handlers.request_verification(
         bot, target_id, forced=True, admin_id=call.from_user.id
     )
+    if code is None:
+        await call.answer("Это владелец бота — проверки на него не действуют",
+                          show_alert=True)
+        return
     await call.answer("Запрос отправлен")
     await call.message.answer(
         f"☑️ Пользователю <code>{target_id}</code> отправлено требование "
@@ -223,6 +227,9 @@ async def verify_command(message: Message, bot: Bot) -> None:
     code = await verification_handlers.request_verification(
         bot, target["id"], forced=True, admin_id=message.from_user.id
     )
+    if code is None:
+        await message.answer("Это владелец бота — проверки на него не действуют.")
+        return
     await message.answer(
         f"☑️ Требование отправлено. Код: <code>{code}</code>\n"
         "Пока пользователь не пройдёт проверку, бот для него закрыт."
@@ -412,6 +419,10 @@ async def report_request_verify(call: CallbackQuery, bot: Bot) -> None:
     code = await verification_handlers.request_verification(
         bot, record["target_id"], forced=True, admin_id=call.from_user.id
     )
+    if code is None:
+        await call.answer("Это владелец бота — проверки на него не действуют",
+                          show_alert=True)
+        return
     await mod_repo.close_report(report_id, call.from_user.id, "done")
     await call.answer("Верификация запрошена")
     await call.message.answer(

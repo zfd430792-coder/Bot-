@@ -36,8 +36,11 @@ class AccessGateMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
+        # Владелец бота не подпадает ни под одну проверку — иначе он рискует
+        # запереть сам себя. Модератор в этом смысле обычный пользователь:
+        # ему тоже нужен username, и забаненным он модерировать не может.
         user = data.get("user")
-        if user is None or data.get("is_staff"):
+        if user is None or data.get("is_admin"):
             return await handler(event, data)
 
         callback_data = event.data or "" if isinstance(event, CallbackQuery) else ""

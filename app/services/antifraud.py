@@ -93,7 +93,8 @@ async def _like_ratio(user_id: int, window: int, after: int) -> tuple[int, float
 
 async def inspect(user_id: int, settings: Settings) -> Verdict | None:
     """Записывает реакцию и возвращает вердикт, если сработала защита."""
-    if not settings.antifraud_enabled:
+    # На владельца бота защита не распространяется
+    if not settings.antifraud_enabled or settings.is_admin(user_id):
         await db.execute(
             f"UPDATE users SET af_last_reaction = {NOW_MS} WHERE id = ?", (user_id,)
         )

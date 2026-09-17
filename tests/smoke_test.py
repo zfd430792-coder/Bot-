@@ -53,6 +53,7 @@ from tests.fake_telegram import (                                      # noqa: E
 ALICE, BOB, CAROL, ADMIN = 100001, 100002, 100003, 900001
 DAVE, EVE, FRANK = 100004, 100005, 100006
 GLEB, HELEN, MOD1, MOD2 = 100007, 100008, 100009, 100010
+NINA, OLEG = 100011, 100012
 EXTRAS = list(range(200001, 200009))        # массовка для ленты
 
 passed = failed = 0
@@ -814,6 +815,107 @@ async def scenarios(h: "Harness", settings, storage) -> int:
 
     await h.click(ADMIN, f"adm:ad_del:{ad_id}", username="boss")
     check(not await ads_repo.list_all(), "пост удаляется")
+
+    # ── 22. Ответный лайк не тратит лимит ───────────────────────────────────
+    section("22. Ответ на чужой лайк не упирается в лимит")
+    await make_profile(NINA, gender="f", name="Нина")
+    await make_profile(OLEG, gender="m", name="Олег")
+    for index, extra in enumerate(range(200200, 200204)):
+        await make_profile(extra, gender="m", name=f"Прохожий {index + 1}")
+
+    await mod_repo.set_setting("likes_limit", "1")
+    h.clear()
+
+    # Нина тратит весь суточный лимит на поиск
+    await h.text(NINA, "🔍 Смотреть анкеты")
+    await h.click(NINA, "br:like:200200")
+    check(await users_repo.likes_left(await users_repo.get_user(NINA), 1) == 0,
+          "лимит израсходован")
+    h.clear()
+
+    await h.click(NINA, "br:like:200201")
+    check(h.said("Лимит лайков на сегодня исчерпан"),
+          "новый лайк в поиске блокируется")
+    check(h.said("Отвечать тем, кто лайкнул вас"),
+          "бот подсказывает, что ответы не ограничены")
+    h.clear()
+
+    # А теперь её лайкнули — ответить она должна мочь
+    await reactions_repo.add_reaction(OLEG, NINA, "like")
+    await h.text(NINA, "❤️ Кто меня лайкнул")
+    check(h.said("Олег"), "анкета отправителя показана несмотря на лимит")
+    counters = [str(getattr(c, "reply_markup", "")) for c in h.session.calls]
+    check(not any("❤️ (0)" in c for c in counters),
+          "на кнопке нет счётчика — лайк бесплатный")
+    h.clear()
+
+    await h.click(NINA, f"br:like:{OLEG}")
+    check(h.said("Взаимная симпатия"), "ответный лайк проходит при нулевом лимите")
+    check(len(await users_repo.get_matches(NINA)) == 1, "совпадение создано")
+    check(await users_repo.likes_left(await users_repo.get_user(NINA), 1) == 0,
+          "ответ не ушёл в минус и лимит не тронут")
+    h.clear()
+
+    # Из уведомления — тоже бесплатно
+    await reactions_repo.add_reaction(200202, NINA, "like", "Привет из уведомления")
+    await h.click(NINA, "ans:like:200202")
+    check(len(await users_repo.get_matches(NINA)) == 2,
+          "ответ из уведомления тоже не требует лимита")
+    h.clear()
+
+    # Но исходящий лайк тому, кто её не лайкал, по-прежнему закрыт
+    await h.text(NINA, "🔍 Смотреть анкеты")
+    await h.click(NINA, "br:like:200203")
+    check(h.said("Лимит лайков"), "лимит на исходящие лайки продолжает работать")
+    await mod_repo.set_setting("likes_limit", "50")
+    h.clear()
+
+    # ── 23. На владельца ограничения не действуют ───────────────────────────
+    section("23. Владелец без ограничений")
+    await make_profile(ADMIN, gender="m", name="Владелец")
+    await mod_repo.set_setting("likes_limit", "1")
+    cfg.af_fast_streak, cfg.af_ratio_window = 3, 5
+    h.clear()
+
+    await h.text(ADMIN, "🔍 Смотреть анкеты", username="boss")
+    for target in (200200, 200201, 200202, 200203):
+        await h.click(ADMIN, f"br:like:{target}", username="boss")
+    check(not h.said("Лимит лайков"), "лимит лайков на владельца не действует")
+
+    owner = await users_repo.get_user(ADMIN)
+    check(owner["af_strikes"] == 0, "антинакрутка владельца не трогает")
+    check(owner["is_banned"] == 0, "владелец не забанен автоматически")
+    check(owner["captcha_passed"] == 1, "капча владельцу не показывается")
+    await mod_repo.set_setting("likes_limit", "50")
+    cfg.af_fast_streak, cfg.af_ratio_window = saved[0], saved[1]
+    h.clear()
+
+    # Капча не выдаётся даже после сброса
+    await users_repo.update_user(ADMIN, captcha_passed=0)
+    await h.text(ADMIN, "/start", username="boss")
+    check(not h.session.of_type("SendPhoto"), "после сброса капча не появляется")
+    check((await users_repo.get_user(ADMIN))["captcha_passed"] == 1,
+          "проверка отмечена пройденной автоматически")
+    h.clear()
+
+    # Отсутствие username владельца не блокирует
+    await h.text(ADMIN, "/start", username=None)
+    check(not h.said("Нужен username"), "владельцу username не обязателен")
+    h.clear()
+
+    # Потребовать верификацию у владельца нельзя
+    await h.click(ADMIN, f"adm:req_verify:{ADMIN}", username="boss")
+    owner = await users_repo.get_user(ADMIN)
+    check(owner["verify_forced"] == 0, "верификацию у владельца не требуют")
+    h.clear()
+
+    # Напоминания владельцу не шлём
+    await db.execute(
+        "UPDATE users SET last_active = datetime('now', '-5 days'), "
+        "last_notify_at = NULL, notify_count = 0 WHERE id = ?", (ADMIN,)
+    )
+    rows = await reengagement.candidates(cfg)
+    check(not any(r["id"] == ADMIN for r in rows), "владельцу напоминания не приходят")
 
     print(f"\n\033[1mИтог: {passed} успешно, {failed} с ошибкой\033[0m")
     return 1 if failed else 0

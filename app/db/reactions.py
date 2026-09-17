@@ -52,6 +52,19 @@ async def has_reacted(from_id: int, to_id: int) -> bool:
     return row is not None
 
 
+async def liked_me(user_id: int, other_id: int) -> bool:
+    """Лайкнул ли `other_id` нашего пользователя.
+
+    Если да, ответный лайк — это не поиск, а ответ на чужую симпатию,
+    и суточный лимит на него не распространяется.
+    """
+    row = await db.fetchone(
+        "SELECT 1 FROM reactions WHERE from_id = ? AND to_id = ? AND kind = 'like'",
+        (other_id, user_id),
+    )
+    return row is not None
+
+
 async def get_note(from_id: int, to_id: int) -> str | None:
     """Текст, который отправитель приложил к лайку."""
     return await db.fetchval(

@@ -14,7 +14,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app import texts
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.db import moderation as mod_repo
 from app.db import users as users_repo
 from app.keyboards import inline as kb
@@ -33,8 +33,15 @@ def new_code(length: int = 4) -> str:
 
 
 async def request_verification(bot: Bot, user_id: int, *, forced: bool,
-                               admin_id: int | None = None) -> str:
-    """Создаёт заявку и уведомляет пользователя. Возвращает код."""
+                               admin_id: int | None = None) -> str | None:
+    """Создаёт заявку и уведомляет пользователя.
+
+    Возвращает код либо None, если это владелец бота — на него ограничения
+    не действуют, и запереть его требованием проверки нельзя.
+    """
+    if get_settings().is_admin(user_id):
+        return None
+
     code = new_code()
     await users_repo.update_user(
         user_id, verify_code=code, verify_status="required" if forced else "pending",
@@ -58,7 +65,8 @@ async def self_request(call: CallbackQuery, state: FSMContext, bot: Bot,
         await call.answer(texts.VERIFY_ALREADY, show_alert=True)
         return
     await call.answer()
-    await request_verification(bot, user["id"], forced=False)
+    if await request_verification(bot, user["id"], forced=False) is None:
+        await call.message.answer("Вы владелец бота — верификация вам не нужна.")
 
 
 @router.callback_query(F.data == "ver:start")

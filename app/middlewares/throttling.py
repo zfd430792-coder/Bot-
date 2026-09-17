@@ -7,6 +7,8 @@ from typing import Any, Awaitable, Callable
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, TelegramObject
 
+from app.config import get_settings
+
 # Действия, которые намеренно делают быстрыми подряд (клетки капчи, лента)
 FAST_PREFIXES = ("cap:tok:", "cap:done", "br:")
 
@@ -25,6 +27,10 @@ class ThrottlingMiddleware(BaseMiddleware):
     ) -> Any:
         user = data.get("event_from_user")
         if user is None:
+            return await handler(event, data)
+
+        # Владельца не тормозим: он тестирует бота и жмёт кнопки подряд
+        if get_settings().is_admin(user.id):
             return await handler(event, data)
 
         limit = self.rate

@@ -45,6 +45,11 @@ async def start(message: Message, state: FSMContext, bot: Bot, user: Mapping[str
         await message.answer(texts.REGISTRATION_CLOSED)
         return
 
+    # Владельцу капча не показывается — проверка нужна против ботов, не против него
+    if is_admin and not user["captcha_passed"]:
+        await users_repo.update_user(user["id"], captcha_passed=1)
+        user = await users_repo.get_user(user["id"])
+
     # Капчу может сбросить антинакрутка, поэтому проверяем её и у давних анкет
     if not user["captcha_passed"]:
         blocked = await captcha_repo.blocked_seconds(user["id"])

@@ -67,8 +67,8 @@ def is_quiet(hour: int, settings: Settings) -> bool:
 
 
 async def candidates(settings: Settings, limit: int = BATCH_SIZE) -> list:
-    """Кому пора напомнить о себе."""
-    return await db.fetchall(
+    """Кому пора напомнить о себе. Владельцев бота не тревожим."""
+    rows = await db.fetchall(
         """
         SELECT id, name, lon, notify_count, last_active,
                (SELECT COUNT(*) FROM reactions r
@@ -101,6 +101,7 @@ async def candidates(settings: Settings, limit: int = BATCH_SIZE) -> list:
             "limit": limit,
         },
     )
+    return [row for row in rows if not settings.is_admin(int(row["id"]))]
 
 
 def compose(row: Mapping[str, Any]) -> str:
