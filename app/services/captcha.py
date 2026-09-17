@@ -50,6 +50,22 @@ SHAPES: dict[str, str] = {
     "heart":    "сердца",
 }
 
+# Пары, которые на небольшой картинке путает живой человек. В одном задании
+# они не встречаются: иначе капча проверяет не «человек ли ты», а зрение.
+CONFUSABLE_COLORS = (
+    frozenset({"green", "cyan"}),     # зелёный и бирюзовый
+    frozenset({"blue", "cyan"}),
+    frozenset({"blue", "purple"}),
+)
+CONFUSABLE_SHAPES = (
+    frozenset({"circle", "hexagon"}), # шестиугольник легко принять за круг
+)
+
+
+def _clashing(value: str, pairs: tuple[frozenset[str], ...]) -> set[str]:
+    return {other for pair in pairs if value in pair for other in pair if other != value}
+
+
 GRID_COLS, GRID_ROWS = 5, 3
 CELLS = GRID_COLS * GRID_ROWS
 CELL = 120
@@ -268,8 +284,10 @@ def _pick_cells() -> tuple[str, str, list[tuple[str, str]], int]:
 
     # Ловушки: та же фигура другого цвета и тот же цвет другой фигурой —
     # невнимательный человек ошибётся, а простой классификатор тем более.
-    other_colors = [c for c in COLORS if c != target_color]
-    other_shapes = [s for s in SHAPES if s != target_shape]
+    banned_colors = _clashing(target_color, CONFUSABLE_COLORS) | {target_color}
+    banned_shapes = _clashing(target_shape, CONFUSABLE_SHAPES) | {target_shape}
+    other_colors = [c for c in COLORS if c not in banned_colors]
+    other_shapes = [s for s in SHAPES if s not in banned_shapes]
     for _ in range(random.randint(2, 3)):
         cells.append((target_shape, random.choice(other_colors)))
     for _ in range(random.randint(2, 3)):

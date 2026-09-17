@@ -148,6 +148,7 @@ CREATE TABLE IF NOT EXISTS captcha_state (
     fails         INTEGER NOT NULL DEFAULT 0,
     total_fails   INTEGER NOT NULL DEFAULT 0,
     passes        INTEGER NOT NULL DEFAULT 0,
+    blocks        INTEGER NOT NULL DEFAULT 0,
     blocked_until TEXT,
     updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -245,6 +246,9 @@ MIGRATIONS: dict[str, dict[str, str]] = {
     },
     "reactions": {
         "note": "TEXT",
+    },
+    "captcha_state": {
+        "blocks": "INTEGER NOT NULL DEFAULT 0",
     },
 }
 

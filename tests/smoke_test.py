@@ -39,11 +39,14 @@ from aiogram.fsm.storage.base import StorageKey                        # noqa: E
 from app import handlers, middlewares                                  # noqa: E402
 from app.config import get_settings                                    # noqa: E402
 from app.db import ads as ads_repo                                     # noqa: E402
+from app.db import captcha as captcha_repo                             # noqa: E402
 from app.db import moderation as mod_repo                              # noqa: E402
 from app.db import reactions as reactions_repo                         # noqa: E402
 from app.db import users as users_repo                                 # noqa: E402
 from app.db.database import db                                         # noqa: E402
 from app.services import antifraud, reengagement                       # noqa: E402
+from app.keyboards import inline as kb_inline                           # noqa: E402
+from app.services import captcha as captcha_service                    # noqa: E402
 from main import build_storage                                         # noqa: E402
 from tests.fake_telegram import (                                      # noqa: E402
     FakeSession, callback_update, location_update, message_update,
@@ -180,6 +183,40 @@ async def scenarios(h: "Harness", settings, storage) -> int:
 
     # ── 2. Капча ────────────────────────────────────────────────────────────
     section("2. Капча")
+    # Задание должно проверять, человек ли ты, а не остроту зрения:
+    # зелёный рядом с бирюзовым путает живых людей
+    clashes = 0
+    for _ in range(300):
+        shape, color, cells, _ = captcha_service._pick_cells()
+        colors = {c for _, c in cells}
+        shapes = {s_ for s_, _ in cells}
+        clashes += len(colors & captcha_service._clashing(
+            color, captcha_service.CONFUSABLE_COLORS))
+        clashes += len(shapes & captcha_service._clashing(
+            shape, captcha_service.CONFUSABLE_SHAPES))
+    check(clashes == 0, "похожие цвета и формы не встречаются в одном задании")
+
+    markup = kb_inline.captcha([(f"t{i}", i) for i in range(1, 16)], {2, 7})
+    labels = [b.text for row in markup.inline_keyboard[:3] for b in row]
+    check("✅2" in labels and "✅7" in labels,
+          "выбранная клетка показывает номер, а не только галочку")
+    check(labels.count("✅") == 0, "номер не теряется при выборе")
+
+    # Первая блокировка короткая, повторные — длиннее
+    blocks = []
+    for _ in range(3):
+        for _ in range(cfg_attempts := get_settings().captcha_max_attempts):
+            left, minutes = await captcha_repo.register_fail(
+                777777, cfg_attempts, get_settings().captcha_block_minutes)
+        blocks.append(minutes)
+    check(blocks[0] == get_settings().captcha_block_minutes,
+          f"первая блокировка короткая ({blocks[0]} мин)")
+    check(blocks[1] > blocks[0] and blocks[2] > blocks[1],
+          f"повторные длиннее: {blocks}")
+    await captcha_repo.register_pass(777777)
+    check(await captcha_repo.blocked_seconds(777777) == 0,
+          "успешная проверка снимает блокировку")
+
     await h.text(ALICE, "/start")
     check(h.session.of_type("SendPhoto"), "капча приходит картинкой")
     check(h.said("выберите"), "задание сформулировано текстом")

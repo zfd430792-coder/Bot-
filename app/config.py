@@ -78,7 +78,7 @@ class Settings:
 
     captcha_max_attempts: int = 3
     captcha_max_refresh: int = 3
-    captcha_block_minutes: int = 15
+    captcha_block_minutes: int = 5
     captcha_timeout_seconds: int = 150
     captcha_min_solve_ms: int = 2000
 
@@ -150,7 +150,7 @@ class Settings:
             rules_delay_seconds=_int("RULES_DELAY_SECONDS", 5),
             captcha_max_attempts=_int("CAPTCHA_MAX_ATTEMPTS", 3),
             captcha_max_refresh=_int("CAPTCHA_MAX_REFRESH", 3),
-            captcha_block_minutes=_int("CAPTCHA_BLOCK_MINUTES", 15),
+            captcha_block_minutes=_int("CAPTCHA_BLOCK_MINUTES", 5),
             captcha_timeout_seconds=_int("CAPTCHA_TIMEOUT_SECONDS", 150),
             captcha_min_solve_ms=_int("CAPTCHA_MIN_SOLVE_MS", 2000),
             throttle_seconds=_float("THROTTLE_SECONDS", 0.4),

@@ -25,7 +25,8 @@ def captcha(buttons: list[tuple[str, int]], selected: set[int],
     """15 клеток по 5 в ряд. Токены случайны — по ним ничего не угадать."""
     builder = InlineKeyboardBuilder()
     for token, label in buttons:
-        mark = "✅" if label in selected else str(label)
+        # Номер обязательно остаётся виден: иначе не проверить, что выбрал
+        mark = f"✅{label}" if label in selected else str(label)
         builder.button(text=mark, callback_data=f"cap:tok:{token}")
     builder.adjust(5, 5, 5)
 

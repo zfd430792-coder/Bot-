@@ -216,7 +216,7 @@ async def captcha_submit(call: CallbackQuery, state: FSMContext, bot: Bot,
 async def _fail_captcha(call: CallbackQuery, state: FSMContext, bot: Bot,
                         user: Mapping[str, Any], settings: Settings,
                         reason: str) -> None:
-    left = await captcha_repo.register_fail(
+    left, block_minutes = await captcha_repo.register_fail(
         user["id"], settings.captcha_max_attempts, settings.captcha_block_minutes
     )
     await mod_repo.log_event("captcha_fail", user["id"], reason=reason)
@@ -227,14 +227,12 @@ async def _fail_captcha(call: CallbackQuery, state: FSMContext, bot: Bot,
         except TelegramBadRequest:
             pass
         await state.clear()
-        await call.message.answer(
-            texts.CAPTCHA_BLOCKED.format(minutes=settings.captcha_block_minutes)
-        )
+        await call.message.answer(texts.CAPTCHA_BLOCKED.format(minutes=block_minutes))
         await admin_log(
             bot,
             f"🤖 Капча: пользователь <code>{user['id']}</code> "
-            f"(@{user['username'] or '—'}) заблокирован после "
-            f"{settings.captcha_max_attempts} неудачных попыток ({reason})."
+            f"(@{user['username'] or '—'}) заблокирован на {block_minutes} мин "
+            f"после {settings.captcha_max_attempts} неудачных попыток ({reason})."
         )
         return
 
