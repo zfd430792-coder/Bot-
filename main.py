@@ -85,43 +85,50 @@ async def main() -> None:
 
     await db.connect(settings.db_path)
 
+    # Закрываем всё в finally при любой ошибке старта: поток aiosqlite не
+    # фоновый, и незакрытая база держит процесс живым после трейсбека —
+    # бот висит «запущенным», а systemd не может его перезапустить
+    storage: RedisStorage | None = None
+    bot: Bot | None = None
+    background: list[asyncio.Task] = []
     try:
-        storage = await build_storage(settings)
-    except RuntimeError as exc:
-        print(f"\n❌ {exc}\n")
-        await db.close()
-        raise SystemExit(1)
+        try:
+            storage = await build_storage(settings)
+        except RuntimeError as exc:
+            print(f"\n❌ {exc}\n")
+            raise SystemExit(1)
 
-    bot = Bot(
-        token=settings.bot_token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
-    dp = Dispatcher(storage=storage)
-    middlewares.setup(dp, settings)
-    handlers.setup(dp)
+        bot = Bot(
+            token=settings.bot_token,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        )
+        dp = Dispatcher(storage=storage)
+        middlewares.setup(dp, settings)
+        handlers.setup(dp)
 
-    me = await bot.get_me()
-    moderators = [
-        int(row["id"]) for row in
-        await db.fetchall("SELECT id FROM users WHERE is_moderator = 1")
-    ]
-    log.info("Бот @%s запущен. Админы: %s, модераторов: %s",
-             me.username, settings.admin_ids, len(moderators))
-    await bot_commands.setup(bot, settings.admin_ids, moderators)
+        me = await bot.get_me()
+        moderators = [
+            int(row["id"]) for row in
+            await db.fetchall("SELECT id FROM users WHERE is_moderator = 1")
+        ]
+        log.info("Бот @%s запущен. Админы: %s, модераторов: %s",
+                 me.username, settings.admin_ids, len(moderators))
+        await bot_commands.setup(bot, settings.admin_ids, moderators)
 
-    background = [
-        asyncio.create_task(housekeeping(bot)),
-        asyncio.create_task(reengagement.loop(bot, settings)),
-    ]
-    try:
+        background = [
+            asyncio.create_task(housekeeping(bot)),
+            asyncio.create_task(reengagement.loop(bot, settings)),
+        ]
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         for task in background:
             task.cancel()
-        await storage.close()
+        if storage is not None:
+            await storage.close()
         await db.close()
-        await bot.session.close()
+        if bot is not None:
+            await bot.session.close()
         log.info("Бот остановлен")
 
 
