@@ -255,8 +255,10 @@ async def show_warning(message: Message, state: FSMContext, bot: Bot,
     """Приветствие уходит, на его месте появляется предупреждение."""
     await screen.drop(message)
     chat_id = message.chat.id
-    if user["rules_accepted"]:
-        # Правила уже приняты — кнопка из старой клавиатуры, просто идём дальше
+    # Нижняя кнопка — просто текст, и прислать его можно в обход капчи.
+    # Правила уже приняты — кнопка из старой клавиатуры. В обоих случаях
+    # begin() покажет то, что нужно сейчас.
+    if user["rules_accepted"] or not user["captcha_passed"]:
         await begin(bot, chat_id, state, user, settings, is_admin,
                     first_name=message.from_user.first_name or "")
         return
@@ -303,7 +305,16 @@ async def _countdown(bot: Bot, chat_id: int, message_id: int, seconds: int,
 
 @router.callback_query(F.data == "onb:accept")
 async def accept_rules(call: CallbackQuery, state: FSMContext, bot: Bot,
-                       user: Mapping[str, Any]) -> None:
+                       user: Mapping[str, Any], settings: Settings,
+                       is_admin: bool) -> None:
+    chat_id = call.message.chat.id if call.message else call.from_user.id
+    if user["registered"] or (not user["captcha_passed"] and not is_admin):
+        # Нажатие можно прислать и без капчи, и со старого сообщения —
+        # begin() покажет то, что нужно сейчас
+        await call.answer()
+        await begin(bot, chat_id, state, user, settings, is_admin,
+                    first_name=call.from_user.first_name or "")
+        return
     await users_repo.update_user(user["id"], rules_accepted=1)
     await call.answer(texts.RULES_ACCEPTED)
     await admin_log(
@@ -312,7 +323,7 @@ async def accept_rules(call: CallbackQuery, state: FSMContext, bot: Bot,
         f"(@{user['username'] or '—'}), {profile.esc(user['tg_name'] or '')}"
     )
     # Предупреждение прочитано — первый шаг анкеты встаёт на его место
-    await registration.start(bot, call.message.chat.id, state)
+    await registration.start(bot, chat_id, state)
 
 
 # ─────────────────────── Повторная проверка username ────────────────────────

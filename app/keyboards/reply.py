@@ -27,16 +27,17 @@ CANCEL = "⬅️ Отмена"
 # ──────────────────────────── Главное меню ──────────────────────────────────
 
 SEARCH = "🔍 Смотреть анкеты"
-LIKES = "❤️ Кто меня лайкнул"           # + « (N)», если есть
-MATCHES = "💬 Мои пары"                  # + « (N)»
 PROFILE = "👤 Моя анкета"
-SETTINGS = "⚙️ Настройки"
-HELP = "ℹ️ Помощь"
+SUPPORT = "💬 Поддержка"
 ADMIN = "🛠 Админ-панель"
 MODERATOR = "👮 Модератор"
-# Надписи прежних версий — у кого-то клавиатура ещё старая
-MATCHES_OLD = "💬 Мои совпадения"
-SETTINGS_OLD = "⚙️ Настройки поиска"
+# Кнопки прежних версий — у кого-то в чате клавиатура ещё старая. Кто лайкнул,
+# теперь первым в ленте; остальные разделы убраны — ведут в меню
+LEGACY_LIKES_RE = re.compile(r"^❤️ Кто меня лайкнул( \(\d+\))?$")
+LEGACY_EDIT = "✏️ Изменить анкету"       # теперь правка — прямо на экране анкеты
+LEGACY_MENU_RE = re.compile(
+    r"^(⚙️ Настройки( поиска)?|ℹ️ Помощь|💬 Мои (пары|совпадения))( \(\d+\))?$"
+)
 
 # ─────────────────────────── Вход в бота ────────────────────────────────────
 
@@ -69,38 +70,24 @@ NOTE = "💌 Сообщение"
 DISLIKE = "👎"
 REPORT = "🚨 Жалоба"
 RESET_SKIPS = "🔄 Вернуть пропущенных"    # + « (N)»
+FAR_YES = "🌍 Смотреть соседние области"
 NO_COMMENT = "📨 Отправить без комментария"
 STOP_REMINDERS = "🔕 Больше не напоминать"
 
 # ────────────────────────────── Моя анкета ──────────────────────────────────
 
-EDIT = "✏️ Изменить анкету"
+# Поменять можно только фото и описание, остальное — заполнив анкету заново
+EDIT_MEDIA = "📸 Изменить фото"
+EDIT_ABOUT = "📝 Изменить описание"
+REFILL_PROFILE = "🔄 Заполнить анкету заново"
 HIDE = "🙈 Скрыть из поиска"
 SHOW = "👀 Показывать в поиске"
 VERIFY = "✅ Пройти верификацию"
 DELETE = "🗑 Удалить анкету"
 DELETE_YES = "🗑 Да, удалить"
 DELETE_NO = "⬅️ Нет, оставить"
-EDIT_MEDIA = "📸 Фото / видео"
-EDIT_ABOUT = "📝 О себе"
-EDIT_NAME = "✏️ Имя"
-EDIT_AGE = "🎂 Возраст"
-CITY = "🌍 Город"
 VERIFY_SEND = "📸 Отправить фото с кодом"
 TO_PROFILE = "⬅️ К анкете"
-
-# ────────────────────────────── Настройки ───────────────────────────────────
-
-AGE_RANGE = "🎂 Возраст поиска"
-RADIUS = "📏 Радиус"
-RESET_SKIPS_ALL = "🔄 Вернуть пропущенные анкеты"
-NOTIFY_ON = "🔔 Напоминания: включены"
-NOTIFY_OFF = "🔕 Напоминания: выключены"
-# С чего начинается лента; 🔘 — выбранный вариант
-SCOPES = (("city", "Сначала мой город"), ("region", "Сначала вся область"),
-          ("near", "Сначала те, кто рядом"))
-RADII = (5, 10, 25, 50, 100, 200, 500)
-RADIUS_RE = re.compile(r"^(\d{1,3}) км$")
 
 # ─────────────────────────────── Админка ────────────────────────────────────
 
@@ -133,6 +120,7 @@ A_AD_DELETE = "🗑 Удалить пост"
 A_AD_LIST = "⬅️ К списку"
 A_STAFF_ADD = "➕ Назначить модератора"
 A_LIKES_LIMIT = "❤️ Лимит лайков"         # + «: N»
+A_SUPPORT = "💬 Контакт поддержки"        # + «: @username» или «: не указан»
 A_REG_OPEN = "🟢 Регистрация открыта"
 A_REG_CLOSED = "🔴 Регистрация закрыта"
 AD_RE = re.compile(r"^📣 #(\d+)\b")
@@ -172,14 +160,11 @@ BACK_ONLY = keyboard([[BACK]])
 ADMIN_BACK = keyboard([[A_BACK]])
 
 
-def main_menu(likes: int = 0, matches: int = 0, *, is_admin: bool = False,
+def main_menu(*, support: bool = False, is_admin: bool = False,
               is_moderator: bool = False) -> ReplyKeyboardMarkup:
-    rows = [
-        [SEARCH],
-        [counted(LIKES, likes), counted(MATCHES, matches)],
-        [PROFILE, SETTINGS],
-        [HELP],
-    ]
+    """support — показывать «Поддержку»: пока контакт не указан, кнопка
+    видна только владельцу, чтобы он знал, где её включить."""
+    rows = [[SEARCH], [PROFILE, SUPPORT] if support else [PROFILE]]
     if is_admin:
         rows.append([ADMIN])
     elif is_moderator:
@@ -236,10 +221,15 @@ def feed(likes_left: int | None = None) -> ReplyKeyboardMarkup:
 
 def feed_end(skipped: int) -> ReplyKeyboardMarkup:
     rows = [[counted(RESET_SKIPS, skipped)]] if skipped else []
-    return keyboard(rows + [[SETTINGS], [HOME]])
+    return keyboard(rows + [[HOME]])
 
 
-LIKES_END = keyboard([[SEARCH], [HOME]])
+def far_offer(skipped: int) -> ReplyKeyboardMarkup:
+    """Город и область пройдены: соседние области — или ещё раз своих."""
+    rows = [[FAR_YES]]
+    if skipped:
+        rows.append([counted(RESET_SKIPS, skipped)])
+    return keyboard(rows + [[HOME]])
 
 
 def report_reasons(reasons: Mapping[str, str]) -> ReplyKeyboardMarkup:
@@ -253,38 +243,17 @@ REMINDER = keyboard([[SEARCH], [STOP_REMINDERS]])
 # ── Моя анкета ──────────────────────────────────────────────────────────────
 
 def profile_actions(is_active: bool, verify_status: str) -> ReplyKeyboardMarkup:
-    rows = [[EDIT], [HIDE if is_active else SHOW]]
+    rows = [[EDIT_MEDIA, EDIT_ABOUT], [REFILL_PROFILE], [HIDE if is_active else SHOW]]
     if verify_status not in {"verified", "pending"}:
         rows.append([VERIFY])
-    rows += [[DELETE], [HOME]]
+    rows.append([DELETE, HOME])
     return keyboard(rows)
 
 
-EDIT_FIELDS = keyboard([[EDIT_MEDIA, EDIT_ABOUT], [EDIT_NAME, EDIT_AGE], [CITY], [BACK]])
 DELETE_CONFIRM = keyboard([[DELETE_YES], [DELETE_NO]])
 VERIFY_SELF = keyboard([[VERIFY_SEND], [TO_PROFILE]])
 VERIFY_REQUIRED = keyboard([[VERIFY_SEND]])
-
-
-# ── Настройки ───────────────────────────────────────────────────────────────
-
-def scope_button(key: str, title: str, current: str) -> str:
-    return f"{'🔘' if key == current else '⚪️'} {title}"
-
-
-def settings(scope_value: str, has_coords: bool,
-             notify_enabled: bool = True) -> ReplyKeyboardMarkup:
-    rows = [[AGE_RANGE, CITY]]
-    rows += [[scope_button(key, title, scope_value)] for key, title in SCOPES]
-    if has_coords and scope_value == "near":
-        rows.append([RADIUS])
-    rows += [[RESET_SKIPS_ALL], [NOTIFY_ON if notify_enabled else NOTIFY_OFF], [HOME]]
-    return keyboard(rows)
-
-
-def radius_choices() -> ReplyKeyboardMarkup:
-    labels = [f"{km} км" for km in RADII]
-    return keyboard([labels[:4], labels[4:], [BACK]])
+SUPPORT_SETUP = keyboard([[ADMIN], [HOME]])
 
 
 # ── Админка ─────────────────────────────────────────────────────────────────
@@ -349,7 +318,9 @@ def staff_list(moderators: Sequence[Mapping]) -> ReplyKeyboardMarkup:
                     + [[A_STAFF_ADD], [A_BACK]])
 
 
-def bot_settings(likes_limit: int, registration_open: bool) -> ReplyKeyboardMarkup:
+def bot_settings(likes_limit: int, registration_open: bool,
+                 support: str) -> ReplyKeyboardMarkup:
     return keyboard([[f"{A_LIKES_LIMIT}: {likes_limit}"],
+                     [f"{A_SUPPORT}: @{support}" if support else f"{A_SUPPORT}: не указан"],
                      [A_REG_OPEN if registration_open else A_REG_CLOSED],
                      [A_BACK]])

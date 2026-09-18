@@ -11,7 +11,7 @@ from aiogram import Dispatcher
 def setup(dp: Dispatcher) -> None:
     from app.handlers import (
         admin, browse, fallback, menu, nav, onboarding, profile, registration,
-        reports, settings, verification,
+        reports, verification,
     )
 
     dp.include_router(nav.router)
@@ -21,7 +21,6 @@ def setup(dp: Dispatcher) -> None:
     dp.include_router(registration.router)
     dp.include_router(reports.router)
     dp.include_router(profile.router)
-    dp.include_router(settings.router)
     dp.include_router(browse.router)
     dp.include_router(menu.router)
     dp.include_router(fallback.router)

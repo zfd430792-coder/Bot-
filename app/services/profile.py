@@ -42,16 +42,16 @@ def esc(text: str | None) -> str:
 def _distance_line(user: Mapping[str, Any], viewer: Mapping[str, Any]) -> str:
     """Расстояние показываем, когда оно что-то говорит.
 
-    Ищет «рядом» — всегда. Иначе — только если человек из другого места:
-    лента доходит и до соседних городов, и «~70 км от вас» объясняет, почему
-    анкета здесь. Для своего города расстояние между центрами — ноль, его
-    не пишем.
+    Поделился геопозицией — всегда: он хотел видеть, кто реально рядом.
+    Иначе — только если человек из другого места: лента доходит и до
+    соседних областей, и «~70 км от вас» объясняет, почему анкета здесь.
+    Для своего города расстояние между центрами — ноль, его не пишем.
     """
     km = user["distance"] if "distance" in user.keys() else None
     if km is None:
         return ""
     same_place = norm_text(user["city"]) == norm_text(viewer["city"])
-    if viewer["search_scope"] == "near" or (not same_place and km >= 5):
+    if viewer["geo_source"] == "gps" or (not same_place and km >= 5):
         return f"\n🚶 {geo.distance_text(km)}"
     return ""
 

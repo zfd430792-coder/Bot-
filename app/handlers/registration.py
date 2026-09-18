@@ -8,9 +8,11 @@
 кнопками вместо прежнего, ответ пользователя удаляется. В чате всегда видно
 ровно текущий шаг, а сверху короткой строкой — то, что уже заполнено.
 
-Отдельного вопроса «где искать» нет: лента сама идёт от ближних к дальним,
-как в Дайвинчике. С чего начинать — город, область или радиус — можно
-поменять в настройках.
+Отсюда же «🔄 Заполнить анкету заново» из «Моей анкеты»: те же шаги, только
+анкета остаётся опубликованной, а каждый ответ заменяет прежний.
+
+Вопроса «где искать» нет: лента сама идёт от ближних к дальним, как в
+Дайвинчике, — город, область, а соседние области с согласия человека.
 """
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from app import texts
-from app.config import Settings, get_settings
+from app.config import Settings
 from app.db import users as users_repo
 from app.db.database import norm_text
 from app.handlers import menu as menu_handlers
@@ -45,35 +47,33 @@ GENDER_BY_BUTTON = {rkb.GENDER_M: "m", rkb.GENDER_F: "f"}
 LOOKING_BY_BUTTON = {rkb.LOOK_M: "m", rkb.LOOK_F: "f", rkb.LOOK_ANY: "any"}
 
 
-def progress(user: Mapping[str, Any] | None) -> str:
-    """Короткая сводка заполненного — вместо отдельных сообщений «✅ принято»."""
+def progress(user: Mapping[str, Any] | None, step: int) -> str:
+    """Короткая сводка заполненного — вместо отдельных сообщений «✅ принято».
+
+    Берём только шаги до текущего: когда анкету заполняют заново, старые
+    ответы на следующие шаги ещё в базе, но они уже не в счёт.
+    """
     if user is None:
         return ""
-    parts: list[str] = []
-    if user["gender"]:
-        parts.append(GENDER_TITLE.get(user["gender"], ""))
-    if user["looking_for"]:
-        parts.append(f"ищу {profile.LOOKING_WORD.get(user['looking_for'], '')}")
-    if user["age"]:
-        parts.append(profile.years(user["age"]))
-    if user["name"]:
-        parts.append(profile.esc(user["name"]))
-    if user["media_id"]:
-        parts.append("фото")
-    if user["about"]:
-        parts.append("о себе")
-    if user["city"]:
-        parts.append(profile.esc(user["city"]))
+    answers = [
+        GENDER_TITLE.get(user["gender"] or "", ""),
+        f"ищу {profile.LOOKING_WORD.get(user['looking_for'], '')}" if user["looking_for"] else "",
+        profile.years(user["age"]) if user["age"] else "",
+        profile.esc(user["name"]) if user["name"] else "",
+        "фото" if user["media_id"] else "",
+        "о себе" if user["about"] else "",
+    ]
+    parts = [answer for answer in answers[:step - 1] if answer]
     if not parts:
         return ""
-    return "✅ <i>" + " · ".join(p for p in parts if p) + "</i>\n\n"
+    return "✅ <i>" + " · ".join(parts) + "</i>\n\n"
 
 
-async def _step(bot: Bot, chat_id: int, state: FSMContext, text: str,
+async def _step(bot: Bot, chat_id: int, state: FSMContext, step: int, text: str,
                 markup=None, error: str | None = None) -> None:
     """Показывает шаг единственным сообщением вместо предыдущего."""
     user = await users_repo.get_user(chat_id)
-    body = (f"⚠️ {error}\n\n" if error else "") + progress(user) + text
+    body = (f"⚠️ {error}\n\n" if error else "") + progress(user, step) + text
     await screen.send(bot, chat_id, state, body, markup)
 
 
@@ -82,19 +82,19 @@ async def _step(bot: Bot, chat_id: int, state: FSMContext, text: str,
 async def ask_gender(bot: Bot, chat_id: int, state: FSMContext,
                      error: str | None = None) -> None:
     await state.set_state(Registration.gender)
-    await _step(bot, chat_id, state, texts.REG_GENDER, rkb.GENDER, error)
+    await _step(bot, chat_id, state, 1, texts.REG_GENDER, rkb.GENDER, error)
 
 
 async def ask_looking(bot: Bot, chat_id: int, state: FSMContext,
                       error: str | None = None) -> None:
     await state.set_state(Registration.looking_for)
-    await _step(bot, chat_id, state, texts.REG_LOOKING, rkb.LOOKING, error)
+    await _step(bot, chat_id, state, 2, texts.REG_LOOKING, rkb.LOOKING, error)
 
 
 async def ask_age(bot: Bot, chat_id: int, state: FSMContext,
                   error: str | None = None) -> None:
     await state.set_state(Registration.age)
-    await _step(bot, chat_id, state, texts.REG_AGE, rkb.REMOVE, error)
+    await _step(bot, chat_id, state, 3, texts.REG_AGE, rkb.REMOVE, error)
 
 
 async def ask_name(bot: Bot, chat_id: int, state: FSMContext,
@@ -104,21 +104,21 @@ async def ask_name(bot: Bot, chat_id: int, state: FSMContext,
     # Имя из Telegram — одной кнопкой, но только если им реально можно
     # пользоваться: кнопка, которая всегда отвечает «не подходит», хуже её отсутствия
     suggestion = validate_name(tg_name, settings)
-    await _step(bot, chat_id, state, texts.REG_NAME,
+    await _step(bot, chat_id, state, 4, texts.REG_NAME,
                 rkb.name_suggestion(suggestion), error)
 
 
 async def ask_media(bot: Bot, chat_id: int, state: FSMContext,
                     settings: Settings, error: str | None = None) -> None:
     await state.set_state(Registration.media)
-    await _step(bot, chat_id, state,
+    await _step(bot, chat_id, state, 5,
                 texts.REG_MEDIA.format(sec=settings.max_video_seconds), rkb.REMOVE, error)
 
 
 async def ask_about(bot: Bot, chat_id: int, state: FSMContext,
                     settings: Settings, error: str | None = None) -> None:
     await state.set_state(Registration.about)
-    await _step(bot, chat_id, state,
+    await _step(bot, chat_id, state, 6,
                 texts.REG_ABOUT.format(max_len=settings.about_max_len), rkb.ABOUT, error)
 
 
@@ -126,14 +126,14 @@ async def ask_city(bot: Bot, chat_id: int, state: FSMContext,
                    error: str | None = None) -> None:
     await state.set_state(Registration.city)
     await state.update_data(city_options=None)
-    await _step(bot, chat_id, state, texts.REG_CITY, rkb.request_location(), error)
+    await _step(bot, chat_id, state, 7, texts.REG_CITY, rkb.request_location(), error)
 
 
 async def ask_region(bot: Bot, chat_id: int, state: FSMContext,
                      error: str | None = None) -> None:
     await state.set_state(Registration.region_fallback)
     await _step(
-        bot, chat_id, state,
+        bot, chat_id, state, 7,
         texts.REG_CITY_NOT_FOUND + "\n\n🗺 Или напишите вашу <b>область / "
         "регион</b> — например, <code>Волгоградская область</code>. "
         "Тогда я буду искать по области.",
@@ -142,14 +142,10 @@ async def ask_region(bot: Bot, chat_id: int, state: FSMContext,
 
 
 async def geo_done(bot: Bot, chat_id: int, state: FSMContext) -> None:
-    """Место известно. Лента начнётся с него — с точки геопозиции или с
-    города, — а дальше сама пойдёт к соседним городам."""
-    user = await users_repo.get_user(chat_id)
-    await users_repo.update_user(
-        chat_id,
-        search_scope="near" if user["geo_source"] == "gps" else "city",
-        search_radius=user["search_radius"] or get_settings().default_radius_km,
-    )
+    """Место известно — дальше предпросмотр. Согласие смотреть соседние
+    области относилось к прежнему месту, поэтому сбрасываем его: когда
+    здесь анкеты кончатся, лента спросит снова."""
+    await users_repo.update_user(chat_id, search_scope=users_repo.SCOPE_HOME)
     await show_preview(bot, chat_id, state)
 
 
@@ -246,12 +242,8 @@ async def set_age(message: Message, state: FSMContext, user, settings: Settings)
             min_age=settings.min_age, max_age=settings.max_age))
         return
 
-    # Разумные рамки поиска по умолчанию — пользователь поменяет их в настройках
-    await users_repo.update_user(
-        user["id"], age=age,
-        age_min=max(settings.min_age, age - 5),
-        age_max=min(settings.max_age, age + 5),
-    )
+    # Кого показывать по возрасту, лента решает сама — см. users.age_window
+    await users_repo.update_user(user["id"], age=age)
     await ask_name(bot, chat_id, state, settings,
                    message.from_user.first_name or "")
 
@@ -405,7 +397,7 @@ async def set_city(message: Message, state: FSMContext, user,
             {"title": c.title, "name": c.name, "region": c.region,
              "country": c.country, "lat": c.lat, "lon": c.lon} for c in found
         ])
-        await _step(bot, chat_id, state, texts.REG_CITY_CHOICE,
+        await _step(bot, chat_id, state, 7, texts.REG_CITY_CHOICE,
                     rkb.city_choices([c.title for c in found]))
         return
 
@@ -469,15 +461,17 @@ async def set_region_fallback(message: Message, state: FSMContext, user) -> None
 async def confirm(message: Message, state: FSMContext, bot: Bot, user,
                   settings: Settings, is_admin: bool) -> None:
     await screen.drop(message)
+    refill = bool((await state.get_data()).get("refill"))
     await users_repo.update_user(user["id"], registered=1, is_active=1)
     fresh = await users_repo.get_user(user["id"])
     await menu_handlers.show_menu(
         bot, message.chat.id, state, fresh, is_admin,
-        note="🎉 <b>Анкета опубликована!</b> Начинайте смотреть анкеты 👇",
+        note=texts.PROFILE_UPDATED if refill else texts.PROFILE_PUBLISHED,
     )
     await admin_log(
         bot,
-        f"✅ Анкета заполнена: <b>{profile.esc(fresh['name'])}</b>, "
+        f"{'✏️ Анкета обновлена' if refill else '✅ Анкета заполнена'}: "
+        f"<b>{profile.esc(fresh['name'])}</b>, "
         f"{fresh['age']} · {profile.GENDER_WORD.get(fresh['gender'], '')} · "
         f"{profile.esc(fresh['city'] or '—')}\n"
         f"<code>{fresh['id']}</code> @{fresh['username'] or '—'}"

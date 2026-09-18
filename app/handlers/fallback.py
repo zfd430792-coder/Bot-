@@ -7,7 +7,7 @@ from aiogram import Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from app import texts
+from app import states, texts
 from app.config import Settings
 from app.handlers import menu as menu_handlers
 from app.handlers import onboarding
@@ -32,9 +32,14 @@ async def unknown(message: Message, state: FSMContext, user: Mapping[str, Any],
                   is_admin: bool) -> None:
     """Непонятное сообщение убираем, а меню напоминает, где кнопки."""
     await screen.drop(message)
+    current = await state.get_state()
     # Посреди диалога (капча, лента) экран уже подсказывает, что нажать, —
     # не сбиваем его ради случайного сообщения
-    if await state.get_state() is not None:
+    if states.is_known(current):
         return
-    await menu_handlers.show_menu(message.bot, message.chat.id, state, user, is_admin,
-                                  note=texts.UNKNOWN if user["registered"] else None)
+    # Диалога нет — или он от прежней версии бота (например, настройки
+    # поиска): у такого экрана хендлеров больше нет, возвращаем в меню
+    await menu_handlers.show_menu(
+        message.bot, message.chat.id, state, user, is_admin,
+        note=texts.UNKNOWN if user["registered"] and current is None else None,
+    )

@@ -1,9 +1,10 @@
-"""Моя анкета: просмотр, редактирование, скрытие и удаление.
+"""Моя анкета: просмотр, новое фото или описание, скрытие и удаление.
 
-Анкета — экран с карточкой и нижними кнопками действий. «Изменить анкету»
-выводит под карточкой, что именно менять; вопрос встаёт вместо карточки,
-ответ пользователя удаляется, после сохранения снова видна обновлённая
-анкета со строкой «✅ сохранено».
+Анкета — экран с карточкой и нижними кнопками действий. Поменять на месте
+можно только фото и описание: вопрос встаёт вместо карточки, ответ
+пользователя удаляется, после сохранения снова видна обновлённая анкета.
+Имя, возраст, город и кого искать меняются через «Заполнить анкету
+заново» — те же шаги, что при регистрации; лайки и пары при этом остаются.
 """
 from __future__ import annotations
 
@@ -17,8 +18,8 @@ from aiogram.types import Message
 from app import texts
 from app.config import Settings
 from app.db import users as users_repo
-from app.handlers import settings as settings_handlers
-from app.handlers.registration import LINK_RE, validate_name
+from app.handlers import registration
+from app.handlers.registration import LINK_RE
 from app.keyboards import reply as rkb
 from app.services import profile as profile_service
 from app.services import screen
@@ -60,6 +61,7 @@ async def show_profile(bot: Bot, chat_id: int, state: FSMContext, user_id: int,
 @router.message(Command("profile"))
 @router.message(F.text == rkb.PROFILE)
 @router.message(F.text == rkb.TO_PROFILE)
+@router.message(F.text == rkb.LEGACY_EDIT)
 async def my_profile(message: Message, state: FSMContext,
                      user: Mapping[str, Any]) -> None:
     await screen.drop(message)
@@ -113,21 +115,8 @@ async def cancel_delete(message: Message, state: FSMContext, user) -> None:
                        notice=f"<i>{texts.CANCELLED}</i>")
 
 
-# ────────────────────────── Редактирование ──────────────────────────────────
+# ─────────────────────── Новое фото или описание ────────────────────────────
 
-@router.message(F.text == rkb.EDIT)
-async def edit_menu(message: Message, state: FSMContext) -> None:
-    """Что меняем — вопрос под карточкой, анкета остаётся перед глазами."""
-    await screen.drop(message)
-    await state.set_state(EditProfile.choosing)
-    sent = await message.bot.send_message(message.chat.id, "✏️ <b>Что меняем?</b>",
-                                          reply_markup=rkb.EDIT_FIELDS)
-    await screen.add(state, [sent.message_id])
-
-
-@router.message(EditProfile.choosing, F.text == rkb.BACK)
-@router.message(EditProfile.name, F.text == rkb.CANCEL)
-@router.message(EditProfile.age, F.text == rkb.CANCEL)
 @router.message(EditProfile.about, F.text == rkb.CANCEL)
 @router.message(EditProfile.media, F.text == rkb.CANCEL)
 async def edit_back(message: Message, state: FSMContext, user) -> None:
@@ -146,52 +135,13 @@ async def _saved(message: Message, state: FSMContext, user_id: int, notice: str)
     await show_profile(message.bot, message.chat.id, state, user_id, notice=notice)
 
 
-@router.message(EditProfile.choosing, F.text == rkb.EDIT_NAME)
-async def edit_name(message: Message, state: FSMContext) -> None:
+@router.message(F.text == rkb.EDIT_ABOUT)
+async def edit_about(message: Message, state: FSMContext, user,
+                     settings: Settings) -> None:
     await screen.drop(message)
-    await _ask(message, state, EditProfile.name, texts.EDIT_ASK_NAME)
-
-
-@router.message(EditProfile.name, F.text)
-async def save_name(message: Message, state: FSMContext, user,
-                    settings: Settings) -> None:
-    await screen.drop(message)
-    name = validate_name(message.text or "", settings)
-    if not name:
-        await _ask(message, state, EditProfile.name, texts.EDIT_ASK_NAME,
-                   texts.REG_NAME_BAD.format(min_len=settings.name_min_len,
-                                             max_len=settings.name_max_len))
+    if not user["registered"]:
+        await show_profile(message.bot, message.chat.id, state, user["id"])
         return
-    await users_repo.update_user(user["id"], name=name)
-    await _saved(message, state, user["id"], "✅ <i>Имя обновлено</i>")
-
-
-@router.message(EditProfile.choosing, F.text == rkb.EDIT_AGE)
-async def edit_age(message: Message, state: FSMContext) -> None:
-    await screen.drop(message)
-    await _ask(message, state, EditProfile.age, texts.EDIT_ASK_AGE)
-
-
-@router.message(EditProfile.age, F.text)
-async def save_age(message: Message, state: FSMContext, user,
-                   settings: Settings) -> None:
-    await screen.drop(message)
-    raw = (message.text or "").strip()
-    bad = texts.REG_AGE_BAD.format(min_age=settings.min_age, max_age=settings.max_age)
-    if not raw.isdigit() or int(raw) > settings.max_age:
-        await _ask(message, state, EditProfile.age, texts.EDIT_ASK_AGE, bad)
-        return
-    if int(raw) < settings.min_age:
-        await _ask(message, state, EditProfile.age, texts.EDIT_ASK_AGE,
-                   texts.REG_AGE_TOO_YOUNG.format(min_age=settings.min_age))
-        return
-    await users_repo.update_user(user["id"], age=int(raw))
-    await _saved(message, state, user["id"], "✅ <i>Возраст обновлён</i>")
-
-
-@router.message(EditProfile.choosing, F.text == rkb.EDIT_ABOUT)
-async def edit_about(message: Message, state: FSMContext, settings: Settings) -> None:
-    await screen.drop(message)
     await _ask(message, state, EditProfile.about,
                texts.EDIT_ASK_ABOUT.format(max_len=settings.about_max_len))
 
@@ -213,9 +163,13 @@ async def save_about(message: Message, state: FSMContext, user,
     await _saved(message, state, user["id"], "✅ <i>Описание обновлено</i>")
 
 
-@router.message(EditProfile.choosing, F.text == rkb.EDIT_MEDIA)
-async def edit_media(message: Message, state: FSMContext, settings: Settings) -> None:
+@router.message(F.text == rkb.EDIT_MEDIA)
+async def edit_media(message: Message, state: FSMContext, user,
+                     settings: Settings) -> None:
     await screen.drop(message)
+    if not user["registered"]:
+        await show_profile(message.bot, message.chat.id, state, user["id"])
+        return
     await _ask(message, state, EditProfile.media,
                texts.REG_MEDIA.format(sec=settings.max_video_seconds))
 
@@ -240,13 +194,17 @@ async def save_media(message: Message, state: FSMContext, user,
     await _saved(message, state, user["id"], "✅ <i>Фото/видео обновлено</i>")
 
 
-@router.message(EditProfile.choosing, F.text == rkb.CITY)
-async def edit_city(message: Message, state: FSMContext) -> None:
-    await screen.drop(message)
-    await settings_handlers.ask_city_change(message.bot, message.chat.id, state,
-                                            back="profile")
+# ───────────────────────── Заполнить заново ─────────────────────────────────
 
-
-@router.message(EditProfile.choosing)
-async def choosing_hint(message: Message) -> None:
+@router.message(F.text == rkb.REFILL_PROFILE)
+async def refill(message: Message, state: FSMContext, bot: Bot, user) -> None:
+    """Все шаги анкеты по новой. Анкета остаётся опубликованной, каждый ответ
+    сразу заменяет прежний — поэтому лайки и пары никуда не деваются."""
     await screen.drop(message)
+    if not user["registered"]:
+        # Новичок идёт через /start: капча и правила — раньше анкеты
+        await show_profile(bot, message.chat.id, state, user["id"])
+        return
+    await state.clear()
+    await state.update_data(refill=True)
+    await registration.start(bot, message.chat.id, state)

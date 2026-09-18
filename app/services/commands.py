@@ -12,8 +12,6 @@ USER = [
     BotCommand(command="start", description="Главное меню"),
     BotCommand(command="search", description="Смотреть анкеты"),
     BotCommand(command="profile", description="Моя анкета"),
-    BotCommand(command="settings", description="Настройки поиска"),
-    BotCommand(command="help", description="Помощь и безопасность"),
 ]
 
 MODERATOR = USER + [

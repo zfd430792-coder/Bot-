@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping
 
 from aiogram import Bot, F, Router
@@ -38,34 +39,25 @@ router.message.filter(IsStaff())
 admin_router = Router(name="admin-panel")
 admin_router.message.filter(IsAdmin())
 
-ADMIN_HELP = (
-    "🛠 <b>Админ-панель</b>\n\n"
-    "<i>На вас не действуют ограничения бота: ни лимит лайков, ни капча, "
-    "ни антинакрутка, ни антифлуд.</i>\n\n"
-    "Быстрые команды:\n"
-    "<code>/find 123456789</code> — карточка пользователя\n"
-    "<code>/ban 123456789 причина</code> — бан\n"
-    "<code>/unban 123456789</code> — снять бан\n"
-    "<code>/verify 123456789</code> — потребовать верификацию\n"
-    "<code>/say 123456789 текст</code> — написать пользователю"
-)
-
-MOD_HELP = (
-    "👮 <b>Панель модератора</b>\n\n"
-    "Вам доступны жалобы, верификация и блокировки.\n\n"
-    "Быстрые команды:\n"
-    "<code>/find 123456789</code> — карточка пользователя\n"
-    "<code>/ban 123456789 причина</code> — бан\n"
-    "<code>/unban 123456789</code> — снять бан\n"
-    "<code>/verify 123456789</code> — потребовать верификацию\n\n"
-    "<i>Каждое действие попадает в журнал с вашим именем. Как обычный "
-    "пользователь вы живёте по общим правилам: лимит лайков, капча и "
-    "антинакрутка действуют и на вас.</i>"
-)
+# Только заголовок: всё остальное — на кнопках. Команды (/find, /ban, /say…)
+# работают как прежде и видны в меню команд Telegram.
+ADMIN_TITLE = "🛠 <b>Админ-панель</b>\n\nВыберите, что нужно:"
+MOD_TITLE = "👮 <b>Панель модератора</b>\n\nВыберите, что нужно:"
 
 BAN_REASON_HINT = (
     "Срок можно указать в начале: <code>7d спам</code> или <code>12h реклама</code>. "
     "Без срока — бессрочно."
+)
+
+SUPPORT_ASK = (
+    "💬 <b>Контакт поддержки</b>\n\n"
+    "Пришлите @username, куда людям писать с вопросами. Кнопка "
+    "«💬 Поддержка» появится в меню у всех, а в сообщении о бане — этот контакт.\n\n"
+    "<i>Убрать кнопку — отправьте «-».</i>"
+)
+# @name, name или ссылка t.me/name. Username в Telegram — от 5 символов
+SUPPORT_RE = re.compile(
+    r"^(?:https?://)?(?:t\.me/|telegram\.me/)?@?([A-Za-z][A-Za-z0-9_]{3,31})/?$"
 )
 
 
@@ -76,7 +68,7 @@ async def open_panel(bot: Bot, chat_id: int, state: FSMContext, is_admin: bool,
     await state.set_state(AdminPanel.menu)
     reports = await mod_repo.count_open_reports()
     verify = await mod_repo.count_pending_verifications()
-    text = ADMIN_HELP if is_admin else MOD_HELP
+    text = ADMIN_TITLE if is_admin else MOD_TITLE
     await screen.send(bot, chat_id, state, f"{notice}\n\n{text}" if notice else text,
                       rkb.admin_menu(reports, verify, is_admin=is_admin))
 
@@ -301,16 +293,18 @@ async def show_config(bot: Bot, chat_id: int, state: FSMContext, settings: Setti
                       notice: str | None = None) -> None:
     likes = await mod_repo.get_int_setting("likes_limit", settings.likes_limit_per_day)
     reg_open = await mod_repo.get_setting("registration_open", "1") == "1"
+    support = await mod_repo.support_username()
     text = (
         "⚙️ <b>Настройки бота</b>\n\n"
         f"❤️ Лимит лайков в сутки: <b>{likes}</b>\n"
+        f"💬 Поддержка: <b>{'@' + support if support else 'не указана'}</b>\n"
         f"📝 Регистрация новых анкет: <b>{'открыта' if reg_open else 'закрыта'}</b>\n\n"
         "<i>Значения применяются сразу и переживают перезапуск. Нажмите на "
         "настройку, чтобы изменить её.</i>"
     )
     await state.set_state(AdminPanel.bot_settings)
     await screen.send(bot, chat_id, state, f"{notice}\n\n{text}" if notice else text,
-                      rkb.bot_settings(likes, reg_open))
+                      rkb.bot_settings(likes, reg_open, support))
 
 
 @admin_router.message(F.text == rkb.A_CONFIG)
@@ -340,6 +334,14 @@ async def ask_likes_limit(message: Message, state: FSMContext) -> None:
                       rkb.BACK_ONLY)
 
 
+@admin_router.message(AdminPanel.bot_settings, F.text.startswith(rkb.A_SUPPORT))
+async def ask_support(message: Message, state: FSMContext) -> None:
+    await screen.drop(message)
+    await state.set_state(AdminPanel.setting_value)
+    await state.update_data(setting_key="support")
+    await screen.send(message.bot, message.chat.id, state, SUPPORT_ASK, rkb.BACK_ONLY)
+
+
 @admin_router.message(AdminPanel.setting_value, F.text)
 async def save_setting(message: Message, state: FSMContext, settings: Settings) -> None:
     await screen.drop(message)
@@ -348,11 +350,34 @@ async def save_setting(message: Message, state: FSMContext, settings: Settings) 
     if raw == rkb.BACK:
         await show_config(bot, chat_id, state, settings)
         return
+    key = (await state.get_data()).get("setting_key") or "likes_limit"
+    if key == "support":
+        await _save_support(message, state, settings, raw)
+        return
     if not raw.isdigit() or not (1 <= int(raw) <= 1000):
         await screen.send(bot, chat_id, state,
                           "⚠️ Нужно число от 1 до 1000.\n\nВведите новый суточный лимит "
                           "лайков:", rkb.BACK_ONLY)
         return
-    key = (await state.get_data()).get("setting_key") or "likes_limit"
     await mod_repo.set_setting(key, raw)
     await show_config(bot, chat_id, state, settings, notice="✅ <i>Сохранено</i>")
+
+
+async def _save_support(message: Message, state: FSMContext, settings: Settings,
+                        raw: str) -> None:
+    bot, chat_id = message.bot, message.chat.id
+    if raw in {"-", "—"}:
+        await mod_repo.set_setting("support", "")
+        await show_config(bot, chat_id, state, settings,
+                          notice="🗑 <i>Контакт поддержки убран — кнопки в меню больше нет</i>")
+        return
+    match = SUPPORT_RE.match(raw)
+    if match is None:
+        await screen.send(bot, chat_id, state,
+                          "⚠️ Не похоже на username — нужно, например, "
+                          f"<code>@help_support</code>.\n\n{SUPPORT_ASK}", rkb.BACK_ONLY)
+        return
+    username = match.group(1)
+    await mod_repo.set_setting("support", username)
+    await show_config(bot, chat_id, state, settings,
+                      notice=f"✅ <i>Поддержка: @{username} — кнопка появилась в меню</i>")

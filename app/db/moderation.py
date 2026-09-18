@@ -205,3 +205,8 @@ async def get_int_setting(key: str, default: int) -> int:
         return int(raw) if raw is not None else default
     except (TypeError, ValueError):
         return default
+
+
+async def support_username() -> str:
+    """Контакт поддержки без «@». Пустая строка — ещё не указан."""
+    return (await get_setting("support", "") or "").strip().lstrip("@")

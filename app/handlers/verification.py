@@ -20,6 +20,7 @@ from app import texts
 from app.config import Settings, get_settings
 from app.db import moderation as mod_repo
 from app.db import users as users_repo
+from app.handlers import profile as profile_handlers
 from app.keyboards import reply as rkb
 from app.services import profile as profile_service
 from app.services import screen
@@ -74,6 +75,10 @@ async def self_request(message: Message, state: FSMContext, bot: Bot,
                        user: Mapping[str, Any]) -> None:
     await screen.drop(message)
     chat_id = message.chat.id
+    if not user["registered"]:
+        # Проверять нечего, а заявка ушла бы админу — сначала анкета
+        await profile_handlers.show_profile(bot, chat_id, state, user["id"])
+        return
     if user["verify_status"] == "verified":
         await screen.send(bot, chat_id, state, texts.VERIFY_ALREADY, rkb.HOME_ONLY)
         return
@@ -96,6 +101,9 @@ async def start_upload(message: Message, state: FSMContext,
                        user: Mapping[str, Any]) -> None:
     await screen.drop(message)
     fresh = await users_repo.get_user(user["id"])
+    if not fresh["registered"] and not fresh["verify_forced"]:
+        await profile_handlers.show_profile(message.bot, message.chat.id, state, user["id"])
+        return
     code = fresh["verify_code"] or new_code()
     if not fresh["verify_code"]:
         await users_repo.update_user(user["id"], verify_code=code)
@@ -117,7 +125,6 @@ async def cancel_upload(message: Message, state: FSMContext,
                           rkb.VERIFY_REQUIRED)
         return
     # Проверку просили сами, из анкеты — туда и возвращаем
-    from app.handlers import profile as profile_handlers
     await profile_handlers.show_profile(message.bot, message.chat.id, state, user["id"])
 
 

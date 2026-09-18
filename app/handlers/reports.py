@@ -15,6 +15,7 @@ from aiogram.types import Message
 from app import texts
 from app.config import Settings
 from app.db import moderation as mod_repo
+from app.db import reactions as reactions_repo
 from app.db import users as users_repo
 from app.handlers import browse
 from app.keyboards import reply as rkb
@@ -114,6 +115,9 @@ async def _submit(bot: Bot, chat_id: int, state: FSMContext,
         return
 
     report_id = await mod_repo.add_report(user["id"], target_id, reason, comment)
+    # На кого пожаловались, того больше не показываем — как после 👎.
+    # Иначе лайкнувший нарушитель, которого лента ставит первым, вернулся бы сразу
+    await reactions_repo.add_reaction(user["id"], target_id, "dislike")
 
     target = await users_repo.get_user(target_id)
     total = target["reports_count"] if target else 0

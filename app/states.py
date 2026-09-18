@@ -29,26 +29,13 @@ class Registration(StatesGroup):
 
 class Browsing(StatesGroup):
     feed = State()          # лента анкет
-    likes_inbox = State()   # «кто меня лайкнул»
     note = State()          # пишем сообщение к лайку
 
 
 class EditProfile(StatesGroup):
-    choosing = State()
-    name = State()
-    age = State()
     about = State()
     media = State()
-    city = State()
-    region_fallback = State()
     delete_confirm = State()
-
-
-class SearchSettings(StatesGroup):
-    menu = State()
-    age_range = State()
-    radius = State()
-    city = State()
 
 
 class Report(StatesGroup):
@@ -87,3 +74,18 @@ class AdminPanel(StatesGroup):
     ad_button_text = State()
     ad_button_url = State()
     ad_every = State()
+
+
+# Диалоги, которые бот сейчас ведёт. В Redis могут остаться состояния прежних
+# версий (например, настроек поиска) — их хендлеров больше нет, и fallback
+# по этому списку понимает, что человека нужно вернуть в меню.
+KNOWN = frozenset(
+    name
+    for group in (Onboarding, Registration, Browsing, EditProfile, Report,
+                  Verification, AdminPanel)
+    for name in group.__all_states_names__
+)
+
+
+def is_known(value: str | None) -> bool:
+    return value in KNOWN

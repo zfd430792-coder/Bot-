@@ -72,7 +72,6 @@ class Settings:
     likes_limit_per_day: int = 50
     min_age: int = 18
     max_age: int = 99
-    default_radius_km: int = 50
     max_video_seconds: int = 15
     rules_delay_seconds: int = 5
 
@@ -108,7 +107,6 @@ class Settings:
     name_max_len: int = 24
     about_max_len: int = 600
     note_max_len: int = 300
-    max_radius_km: int = 500
 
     @classmethod
     def load(cls) -> "Settings":
@@ -145,7 +143,6 @@ class Settings:
             likes_limit_per_day=_int("LIKES_LIMIT_PER_DAY", 50),
             min_age=max(1, _int("MIN_AGE", 18)),
             max_age=_int("MAX_AGE", 99),
-            default_radius_km=_int("DEFAULT_RADIUS_KM", 50),
             max_video_seconds=_int("MAX_VIDEO_SECONDS", 15),
             rules_delay_seconds=_int("RULES_DELAY_SECONDS", 5),
             captcha_max_attempts=_int("CAPTCHA_MAX_ATTEMPTS", 3),

@@ -24,7 +24,7 @@ from app.handlers.admin.filters import IsStaff
 from app.keyboards import reply as rkb
 from app.services import profile as profile_service
 from app.services import screen
-from app.services.notify import admin_log, safe_send
+from app.services.notify import admin_log, appeal_contact, safe_send
 from app.states import AdminPanel
 
 router = Router(name="staff-moderation")
@@ -61,6 +61,7 @@ async def do_ban(bot: Bot, admin_id: int, target: Mapping[str, Any],
         texts.BANNED.format(
             reason=reason,
             until=f"\n<b>Действует до:</b> {until} (UTC)" if until else "",
+            contact=await appeal_contact(),
         ),
         rkb.REMOVE,
     )

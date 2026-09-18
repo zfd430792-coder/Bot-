@@ -10,11 +10,20 @@ from aiogram.exceptions import (
 )
 from aiogram.types import ReplyKeyboardMarkup, ReplyKeyboardRemove
 
+from app import texts
 from app.config import get_settings
+from app.db import moderation as mod_repo
 
 log = logging.getLogger(__name__)
 
 Markup = ReplyKeyboardMarkup | ReplyKeyboardRemove | None
+
+
+async def appeal_contact() -> str:
+    """Куда писать, если бан кажется ошибкой: в поддержку, если она указана."""
+    username = await mod_repo.support_username()
+    return (texts.BANNED_CONTACT.format(username=username) if username
+            else texts.BANNED_NO_CONTACT)
 
 
 async def safe_send(bot: Bot, chat_id: int, text: str,

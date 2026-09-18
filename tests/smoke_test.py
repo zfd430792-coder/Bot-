@@ -67,6 +67,8 @@ NINA, OLEG = 100011, 100012
 SCREEN = 100013
 RESTART, NEWBIE, CAPTCHA_LOOK = 100014, 100015, 100016
 M_SAMARA, M_REGION, F_SAMARA, F_REGION, F_TLT, F_MSK, F_LEGACY = range(100020, 100027)
+VIEWER, AGE_VIEWER, AGE_28, AGE_29, AGE_32, AGE_33 = range(100030, 100036)
+SNEAKY = 100040
 EXTRAS = list(range(200001, 200009))        # массовка для ленты
 
 passed = failed = 0
@@ -172,8 +174,7 @@ async def register(h: Harness, user_id: int, *, gender: str, looking: str,
 
 async def make_profile(user_id: int, *, gender: str, name: str,
                        city: str = "Волгоград", region: str | None = "Волгоградская область",
-                       lat: float = 48.708, lon: float = 44.513, age: int = 25,
-                       age_min: int = 18, age_max: int = 99) -> None:
+                       lat: float = 48.708, lon: float = 44.513, age: int = 25) -> None:
     """Готовая анкета напрямую в базе — чтобы не проходить мастер ради массовки."""
     await users_repo.ensure_user(user_id, f"user{user_id}", name)
     await users_repo.update_user(
@@ -181,8 +182,14 @@ async def make_profile(user_id: int, *, gender: str, name: str,
         name=name, gender=gender, looking_for="any", age=age, about="Тестовая анкета",
         media_type="photo", media_id=f"photo-{user_id}", city=city, region=region,
         country="RU", lat=lat, lon=lon, geo_source="city", search_scope="city",
-        age_min=age_min, age_max=age_max,
     )
+
+
+async def matches_of(user_id: int) -> int:
+    return int(await db.fetchval(
+        "SELECT COUNT(*) FROM matches WHERE user_a = ? OR user_b = ?",
+        (user_id, user_id), default=0,
+    ))
 
 
 async def main() -> int:
@@ -346,14 +353,16 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     # Вопроса «где искать» больше нет: лента сама идёт от ближних к дальним
     check(h.said("Вот как её увидят другие"), "сразу показан предпросмотр анкеты")
     check(h.keyboard(ALICE) == [rkb.CONFIRM, rkb.REFILL], "подтверждение — нижними кнопками")
-    check(user["search_scope"] == "city", "лента начнётся с её места")
+    check(user["search_scope"] == users_repo.SCOPE_HOME,
+          "соседние области — только после её согласия")
     h.clear()
 
     await h.press(ALICE, rkb.CONFIRM)
     user = await users_repo.get_user(ALICE)
     check(user["registered"] == 1 and user["is_active"] == 1, "анкета опубликована")
-    check(user["age_min"] == 21 and user["age_max"] == 31,
-          "возрастные рамки поиска выставлены по умолчанию")
+    check(users_repo.age_window(18) == (17, 20), "написали «18» — ищем от 17 до 20")
+    check(users_repo.age_window(user["age"]) == (25, 28),
+          "возраст в ленте — от года младше до двух лет старше")
     check(rkb.SEARCH in h.keyboard(ALICE), "после публикации — меню внизу")
     h.clear()
 
@@ -366,7 +375,7 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     await h.click(BOB, "onb:accept")
     await h.press(BOB, rkb.GENDER_M)
     await h.press(BOB, rkb.LOOK_F)
-    await h.text(BOB, "28")
+    await h.text(BOB, "27")
     await h.text(BOB, "Борис")
     await h.photo(BOB)
     await h.text(BOB, "Инженер, играю на гитаре.")
@@ -382,14 +391,14 @@ async def scenarios(h: "Harness", settings, storage) -> int:
 
     await h.press(BOB, rkb.CONFIRM)
     user = await users_repo.get_user(BOB)
-    check(user["search_scope"] == "near", "с геопозицией лента начинается с тех, кто рядом")
+    check(user["registered"] == 1, "анкета с геопозицией опубликована")
 
     # ── 6. Лента и совпадение ───────────────────────────────────────────────
     section("6. Лента, лайки и совпадение")
     h.clear()
     await h.press(BOB, rkb.SEARCH)
     check(h.said("Алиса"), "Борису показана анкета Алисы")
-    check(h.said("км от вас"), "в режиме «рядом» показано расстояние")
+    check(h.said("км от вас"), "с геопозицией видно расстояние")
     feed_keys = h.keyboard(BOB)
     check(feed_keys[0].startswith(rkb.LIKE) and rkb.NOTE in feed_keys
           and rkb.DISLIKE in feed_keys and rkb.REPORT in feed_keys and rkb.HOME in feed_keys,
@@ -403,26 +412,26 @@ async def scenarios(h: "Harness", settings, storage) -> int:
 
     await h.press(ALICE, rkb.SEARCH)
     check(h.said("Борис"), "Алисе показан Борис")
+    check(h.said("Вы понравились этому человеку"), "над анкетой сказано, что он её лайкнул")
     h.clear()
     await h.press(ALICE, rkb.LIKE)
     check(h.said("Взаимная симпатия"), "сработало совпадение")
     check(h.said("@tester"), "выданы контакты для переписки")
-    matches = await users_repo.get_matches(ALICE)
-    check(len(matches) == 1, "совпадение сохранено в базе")
+    check(await matches_of(ALICE) == 1, "совпадение сохранено в базе")
     h.clear()
 
     # ── 7. Лимит лайков ─────────────────────────────────────────────────────
     section("7. Лимит лайков")
     await mod_repo.set_setting("likes_limit", "1")
     await users_repo.update_user(CAROL, username="carol")
-    await register(h, CAROL, gender="f", looking="m", age="24",
+    await register(h, CAROL, gender="f", looking="m", age="28",
                    name="Карина", city="Волгоград")
     h.clear()
     await h.press(BOB, rkb.SEARCH)
     check((await h.state_data(BOB)).get("current") == CAROL, "Борису показана Карина")
     await h.press(BOB, rkb.LIKE)
     check(h.said("Лимит лайков на сегодня исчерпан"), "лимит лайков срабатывает")
-    check(not await users_repo.get_matches(CAROL), "лайк сверх лимита не засчитан")
+    check(await matches_of(CAROL) == 0, "лайк сверх лимита не засчитан")
     check((await h.state_data(BOB)).get("current") == CAROL,
           "анкета осталась на экране — её можно пропустить")
     await mod_repo.set_setting("likes_limit", "50")
@@ -441,6 +450,8 @@ async def scenarios(h: "Harness", settings, storage) -> int:
                    if getattr(c, "chat_id", None) == ADMIN]
     check(bool(admin_texts), "жалоба ушла администратору")
     check(await mod_repo.count_open_reports() == 1, "жалоба записана в базу")
+    check(await reactions_repo.has_reacted(BOB, CAROL),
+          "на кого пожаловались, того лента больше не покажет")
     h.clear()
 
     # ── 9. Админ-панель ─────────────────────────────────────────────────────
@@ -450,6 +461,8 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     panel_keys = h.keyboard(ADMIN)
     check(rkb.A_STATS in panel_keys and rkb.A_BROADCAST in panel_keys
           and rkb.HOME in panel_keys, "разделы админки — нижними кнопками")
+    check(not h.said("Быстрые команды") and not h.said("не действуют ограничения"),
+          "в админке только заголовок и кнопки")
     h.clear()
     await h.press(ADMIN, rkb.A_STATS, username="boss")
     check(h.said("Статистика бота"), "статистика собирается")
@@ -498,7 +511,8 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     check(h.keyboard(CAROL) == [rkb.VERIFY_SEND], "отправить фото — нижней кнопкой")
     h.clear()
 
-    candidates = await users_repo.search_candidates(await users_repo.get_user(BOB))
+    await make_profile(VIEWER, gender="m", name="Зритель", age=28)
+    candidates = await users_repo.search_candidates(await users_repo.get_user(VIEWER))
     check(all(c["id"] != CAROL for c in candidates),
           "анкета на проверке скрыта из поиска")
 
@@ -516,9 +530,12 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     user = await users_repo.get_user(CAROL)
     check(user["verify_status"] == "verified", "верификация подтверждена")
     check(user["verify_forced"] == 0, "блокировка снята")
+    candidates = await users_repo.search_candidates(await users_repo.get_user(VIEWER))
+    check(any(c["id"] == CAROL for c in candidates), "после проверки анкета снова в поиске")
+    await users_repo.update_user(VIEWER, is_active=0)
     h.clear()
     await h.press(CAROL, rkb.PROFILE)
-    check(h.said("24 года ✅"), "в анкете появилась зелёная галочка")
+    check(h.said("28 лет ✅"), "в анкете появилась зелёная галочка")
     check(not h.said("☑️"), "серой галочки нигде нет")
     h.clear()
 
@@ -558,25 +575,83 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     check(row is not None and row["total"] >= 3, "рассылка записана в журнал")
     h.clear()
 
-    # ── 13. Настройки поиска ────────────────────────────────────────────────
-    section("13. Настройки поиска")
-    await h.press(BOB, rkb.SETTINGS)
-    check(h.said("Настройки поиска"), "настройки открываются")
-    check(rkb.scope_button("near", "Сначала те, кто рядом", "near") in h.keyboard(BOB),
-          "выбранный вариант отмечен 🔘")
-    h.clear()
-    await h.press(BOB, rkb.AGE_RANGE)
-    await h.text(BOB, "20-45")
-    user = await users_repo.get_user(BOB)
-    check(user["age_min"] == 20 and user["age_max"] == 45, "возрастные рамки сохранены")
-    await h.press(BOB, rkb.RADIUS)
-    await h.press(BOB, "100 км")
-    user = await users_repo.get_user(BOB)
-    check(user["search_radius"] == 100, "радиус поиска сохранён")
+    # ── 13. Настроек нет: бот ищет сам ──────────────────────────────────────
+    section("13. Без настроек: возраст и место бот выбирает сам")
+    await h.text(BOB, "/start")
+    check(h.keyboard(BOB) == [rkb.SEARCH, rkb.PROFILE],
+          "в меню только анкеты и своя анкета (поддержка ещё не указана)")
     h.clear()
 
-    # ── 14. Скрытие и удаление анкеты ───────────────────────────────────────
+    # Кнопки со старой клавиатуры никуда не деваются — ведут в меню и в ленту
+    tap = await h.press(BOB, "⚙️ Настройки")
+    check(h.said("Главное меню") and not h.said("Не понял"),
+          "старая кнопка «Настройки» открывает меню")
+    check(tap in {c.message_id for c in h.session.of_type("DeleteMessage")},
+          "нажатие старой кнопки убрано из чата")
+    h.clear()
+    await h.press(BOB, "❤️ Кто меня лайкнул (2)")
+    check(h.said("Вы посмотрели все анкеты"),
+          "старая кнопка «Кто меня лайкнул» открывает ленту")
+    h.clear()
+    await h.press(BOB, rkb.LEGACY_EDIT)
+    check(rkb.EDIT_ABOUT in h.keyboard(BOB), "старая «Изменить анкету» ведёт в анкету")
+    h.clear()
+
+    # Возраст: 30 лет — лента показывает 29–32, а 28 и 33 уже нет
+    penza = dict(city="Пенза", region="Пензенская область", lat=53.195, lon=45.018)
+    await make_profile(AGE_VIEWER, gender="m", name="Пензенец", age=30, **penza)
+    await users_repo.update_user(AGE_VIEWER, looking_for="f")
+    for uid, age in ((AGE_28, 28), (AGE_29, 29), (AGE_32, 32), (AGE_33, 33)):
+        await make_profile(uid, gender="f", name=f"Пензячка {age}", age=age, **penza)
+    rows = await users_repo.search_candidates(await users_repo.get_user(AGE_VIEWER))
+    found = {int(r["id"]) for r in rows}
+    check(found == {AGE_29, AGE_32}, f"30 лет — видны 29–32 ({sorted(found)})")
+    for uid in (AGE_VIEWER, AGE_28, AGE_29, AGE_32, AGE_33):
+        await users_repo.update_user(uid, is_active=0)      # дальше не мешают
+    h.clear()
+
+    # ── 14. Своя анкета ─────────────────────────────────────────────────────
     section("14. Управление анкетой")
+    await h.press(ALICE, rkb.PROFILE)
+    keys = h.keyboard(ALICE)
+    check({rkb.EDIT_MEDIA, rkb.EDIT_ABOUT, rkb.REFILL_PROFILE} <= set(keys),
+          "в анкете: новое фото, новое описание, заполнить заново")
+    check(not any("Имя" in k or "Возраст" in k or "Город" in k for k in keys),
+          "имя, возраст и город отдельно не правятся")
+    h.clear()
+
+    await h.press(ALICE, rkb.EDIT_ABOUT)
+    await h.text(ALICE, "Теперь люблю ещё и велосипед.")
+    check((await users_repo.get_user(ALICE))["about"] == "Теперь люблю ещё и велосипед.",
+          "описание обновлено")
+    check(h.said("Описание обновлено"), "обновлённая анкета снова на экране")
+    await h.press(ALICE, rkb.EDIT_MEDIA)
+    await h.photo(ALICE)
+    check((await users_repo.get_user(ALICE))["media_type"] == "photo", "фото обновлено")
+    h.clear()
+
+    # Заполнить заново: те же шаги, старые ответы в прогресс не попадают
+    await h.press(ALICE, rkb.REFILL_PROFILE)
+    check(h.said("Шаг 1 из 7"), "заполнение заново начинается с первого шага")
+    check(not h.said("Урюпинск") and not h.said("26 лет"),
+          "старые ответы не выдаются за заполненные")
+    await h.press(ALICE, rkb.GENDER_F)
+    await h.press(ALICE, rkb.LOOK_M)
+    await h.text(ALICE, "27")
+    await h.text(ALICE, "Алиса")
+    await h.photo(ALICE)
+    await h.press(ALICE, rkb.SKIP)
+    await h.text(ALICE, "Волгоград")
+    check(h.said("Вот как её увидят другие"), "в конце — предпросмотр")
+    h.clear()
+    await h.press(ALICE, rkb.CONFIRM)
+    user = await users_repo.get_user(ALICE)
+    check(user["age"] == 27 and user["city"] == "Волгоград" and user["about"] == "",
+          "анкета заполнена заново")
+    check(h.said("Анкета обновлена"), "бот говорит, что анкета обновлена")
+    check(await matches_of(ALICE) == 1, "пары после обновления анкеты сохранились")
+    h.clear()
+
     await h.press(ALICE, rkb.PROFILE)
     await h.press(ALICE, rkb.HIDE)
     user = await users_repo.get_user(ALICE)
@@ -590,7 +665,7 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     await h.press(ALICE, rkb.DELETE_YES)
     user = await users_repo.get_user(ALICE)
     check(user["registered"] == 0 and user["name"] is None, "анкета удалена")
-    check(not await users_repo.get_matches(BOB), "совпадения удалённого убраны")
+    check(await matches_of(BOB) == 0, "совпадения удалённого убраны")
 
     # ── 15. Антинакрутка: скорость ──────────────────────────────────────────
     section("15. Антинакрутка: слишком быстрые реакции")
@@ -766,8 +841,8 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     # ── 19. Лайк с сообщением ───────────────────────────────────────────────
     section("19. Лайк с сообщением")
     # Возраст 33 — чтобы Глебу первой попалась именно Елена, а не массовка
-    await make_profile(GLEB, gender="m", name="Глеб", age=33, age_min=32, age_max=34)
-    await make_profile(HELEN, gender="f", name="Елена", age=33, age_min=32, age_max=34)
+    await make_profile(GLEB, gender="m", name="Глеб", age=33)
+    await make_profile(HELEN, gender="f", name="Елена", age=33)
     h.clear()
 
     await h.press(GLEB, rkb.SEARCH)
@@ -794,27 +869,29 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     to_helen = [c for c in h.session.calls if getattr(c, "chat_id", None) == HELEN]
     delivered = " ".join((getattr(c, "text", "") or "") for c in to_helen)
     check("написали вместе с лайком" in delivered, "Елене пришло уведомление")
-    check("Кто меня лайкнул" in delivered, "уведомление говорит, где ответить")
+    check("Смотреть анкеты" in delivered, "уведомление говорит, где ответить")
     check(not any(getattr(c, "reply_markup", None) for c in to_helen),
           "уведомление без кнопок — клавиатуру Елены не сбивает")
     h.clear()
 
-    await h.press(HELEN, rkb.counted(rkb.LIKES, 1))
-    check(h.said("Глеб"), "в «Кто меня лайкнул» — анкета отправителя")
+    await h.press(HELEN, rkb.SEARCH)
+    check(h.said("Глеб"), "первой в ленте — анкета отправителя")
     check(h.said("где снимали фото"), "и его сообщение")
     await h.press(HELEN, rkb.LIKE)
     check(h.said("Взаимная симпатия"), "ответ взаимностью создаёт совпадение")
-    check(len(await users_repo.get_matches(HELEN)) == 1, "совпадение сохранено")
+    check(await matches_of(HELEN) == 1, "совпадение сохранено")
     h.clear()
 
-    # Если не ответить сразу, сообщение ждёт в «кто меня лайкнул»
+    # Не ответила сразу — лайк ждёт первым в ленте, даже вне её возраста
     await make_profile(200100, gender="m", name="Игорь")
-    await reactions_repo.add_reaction(200100, HELEN, "like", "Сообщение из инбокса")
-    await h.press(HELEN, rkb.LIKES)
-    check(h.said("Сообщение из инбокса"), "текст виден и в списке лайков")
+    await reactions_repo.add_reaction(200100, HELEN, "like", "Сообщение из ленты")
+    await h.press(HELEN, rkb.SEARCH)
+    check((await h.state_data(HELEN)).get("current") == 200100,
+          "лайкнувший первым, даже если старше или младше её рамок")
+    check(h.said("Сообщение из ленты"), "его сообщение видно на карточке")
     # Для разделов ниже Глеб и Елена снова обычного возраста
     for uid in (GLEB, HELEN):
-        await users_repo.update_user(uid, age=25, age_min=18, age_max=99)
+        await users_repo.update_user(uid, age=25)
     h.clear()
 
     # ── 20. Модераторы ──────────────────────────────────────────────────────
@@ -949,13 +1026,12 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     # ── 22. Ответный лайк не тратит лимит ───────────────────────────────────
     section("22. Ответ на чужой лайк не упирается в лимит")
     # Возраст 41 — чтобы Нина листала только своих, без массовки
-    await make_profile(NINA, gender="f", name="Нина", age=41, age_min=40, age_max=42)
+    await make_profile(NINA, gender="f", name="Нина", age=41)
     for index, extra in enumerate(range(200200, 200204)):
-        await make_profile(extra, gender="m", name=f"Прохожий {index + 1}",
-                           age=41, age_min=40, age_max=42)
+        await make_profile(extra, gender="m", name=f"Прохожий {index + 1}", age=41)
     # Олег и Пётр старше её рамок: в ленте их нет, но лайкнуть её они могут
-    await make_profile(OLEG, gender="m", name="Олег", age=45, age_min=40, age_max=46)
-    await make_profile(200204, gender="m", name="Пётр", age=45, age_min=40, age_max=46)
+    await make_profile(OLEG, gender="m", name="Олег", age=45)
+    await make_profile(200204, gender="m", name="Пётр", age=45)
 
     await mod_repo.set_setting("likes_limit", "1")
     h.clear()
@@ -976,23 +1052,23 @@ async def scenarios(h: "Harness", settings, storage) -> int:
 
     # А теперь её лайкнули — ответить она должна мочь
     await reactions_repo.add_reaction(OLEG, NINA, "like")
-    await h.press(NINA, rkb.counted(rkb.LIKES, 1))
+    await h.press(NINA, rkb.SEARCH)
     check(h.said("Олег"), "анкета отправителя показана несмотря на лимит")
     check(h.keyboard(NINA)[0] == rkb.LIKE, "на кнопке нет счётчика — лайк бесплатный")
     h.clear()
 
     await h.press(NINA, rkb.LIKE)
     check(h.said("Взаимная симпатия"), "ответный лайк проходит при нулевом лимите")
-    check(len(await users_repo.get_matches(NINA)) == 1, "совпадение создано")
+    check(await matches_of(NINA) == 1, "совпадение создано")
     check(await users_repo.likes_left(await users_repo.get_user(NINA), 1) == 0,
           "ответ не ушёл в минус и лимит не тронут")
     h.clear()
 
     # Лайк с сообщением — тоже бесплатно
     await reactions_repo.add_reaction(200204, NINA, "like", "Привет из уведомления")
-    await h.press(NINA, rkb.LIKES)
+    await h.press(NINA, rkb.SEARCH)
     await h.press(NINA, rkb.LIKE)
-    check(len(await users_repo.get_matches(NINA)) == 2,
+    check(await matches_of(NINA) == 2,
           "ответ на лайк с сообщением тоже не требует лимита")
     h.clear()
 
@@ -1127,27 +1203,60 @@ async def scenarios(h: "Harness", settings, storage) -> int:
           "в меню только заголовок и «Выберите, что нужно»")
     check(not h.said("Вас лайкнули"), "сводки в меню нет")
     markup = menus[-1].reply_markup if menus else None
-    check(isinstance(markup, ReplyKeyboardMarkup) and rkb.SEARCH in h.keyboard(SCREEN),
-          "разделы — нижними кнопками")
+    check(isinstance(markup, ReplyKeyboardMarkup)
+          and h.keyboard(SCREEN) == [rkb.SEARCH, rkb.PROFILE],
+          "в меню только анкеты и своя анкета — нижними кнопками")
     check(h.session.visible(SCREEN) == 1, "в чате одно сообщение — меню")
     h.clear()
 
-    tap = await h.press(SCREEN, rkb.HELP, username="screenuser")
-    check(h.said("Справка") and tap in {c.message_id for c in h.session.of_type("DeleteMessage")},
-          "справка открывается, нажатие кнопки убрано")
-    check(h.keyboard(SCREEN) == [rkb.HOME], "из справки — «🏠 Меню»")
-    await h.press(SCREEN, rkb.HOME, username="screenuser")
-    check(h.session.visible(SCREEN) == 1, "после переходов сообщение по-прежнему одно")
-    h.clear()
-
-    await h.press(SCREEN, rkb.MATCHES, username="screenuser")
-    check(h.said("пока нет") and h.said("Главное меню"),
-          "пустой раздел — подсказкой над меню, без лишних экранов")
+    tap = await h.press(SCREEN, "💬 Мои пары (1)", username="screenuser")
+    check(h.said("Главное меню")
+          and tap in {c.message_id for c in h.session.of_type("DeleteMessage")},
+          "старая кнопка «Мои пары» просто открывает меню")
     junk = await h.text(SCREEN, "как дела?", username="screenuser")
     check(junk in {c.message_id for c in h.session.of_type("DeleteMessage")},
           "непонятное сообщение убирается")
     check(h.said("Не понял"), "меню подсказывает, что нажать")
     check(h.session.visible(SCREEN) == 1, "меню так и осталось одним сообщением")
+    h.clear()
+
+    # Диалог прежней версии (ввод возраста в настройках) не держит человека
+    old_key = StorageKey(bot_id=h.bot.id, chat_id=SCREEN, user_id=SCREEN)
+    await h.dp.storage.set_state(old_key, "SearchSettings:age_range")
+    await h.text(SCREEN, "20-30", username="screenuser")
+    check(h.said("Главное меню") and not h.said("Не понял"),
+          "из диалога прежней версии — сразу в меню")
+    check(await h.dp.storage.get_state(old_key) is None, "старое состояние сброшено")
+    h.clear()
+
+    # Поддержка: пока контакт не указан, кнопку видит только владелец
+    await h.text(ADMIN, "/start", username="boss")
+    check(rkb.SUPPORT in h.keyboard(ADMIN), "владелец видит «Поддержку» сразу")
+    await h.press(ADMIN, rkb.SUPPORT, username="boss")
+    check(h.said("ещё не указан"), "и подсказку, где указать контакт")
+    h.clear()
+    await h.text(ADMIN, "/admin", username="boss")
+    await h.press(ADMIN, rkb.A_CONFIG, username="boss")
+    await h.press(ADMIN, f"{rkb.A_SUPPORT}: не указан", username="boss")
+    await h.text(ADMIN, "не username!", username="boss")
+    check(h.said("Не похоже на username"), "мусор вместо username не сохраняется")
+    await h.text(ADMIN, "https://t.me/lune_help", username="boss")
+    check(await mod_repo.support_username() == "lune_help",
+          "контакт поддержки сохранён, даже если прислали ссылку")
+    check(f"{rkb.A_SUPPORT}: @lune_help" in h.keyboard(ADMIN), "контакт виден в настройках бота")
+    h.clear()
+
+    await h.text(SCREEN, "/start", username="screenuser")
+    check(h.keyboard(SCREEN) == [rkb.SEARCH, rkb.PROFILE, rkb.SUPPORT],
+          "с контактом «Поддержка» появилась у всех")
+    await h.press(SCREEN, rkb.SUPPORT, username="screenuser")
+    check(h.said("@lune_help"), "в поддержке — контакт")
+    check(h.keyboard(SCREEN) == [rkb.HOME], "из поддержки — «🏠 Меню»")
+    h.clear()
+
+    await h.text(ADMIN, f"/ban {SCREEN} проверка", username="boss")
+    check(h.said("напишите в поддержку: @lune_help"), "в сообщении о бане — контакт поддержки")
+    await h.text(ADMIN, f"/unban {SCREEN}", username="boss")
     h.clear()
 
     # ── 27. Лента как в Дайвинчике ──────────────────────────────────────────
@@ -1161,8 +1270,7 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     for uid, gender, name, place in (
             (M_SAMARA, "m", "Самарец", samara), (F_SAMARA, "f", "Самарчанка", samara),
             (F_TLT, "f", "Тольяттинка", tlt), (F_MSK, "f", "Москвичка", msk)):
-        await make_profile(uid, gender=gender, name=name, age=50, age_min=48, age_max=52,
-                           **place)
+        await make_profile(uid, gender=gender, name=name, age=50, **place)
 
     h.clear()
     await register(h, F_REGION, gender="f", looking="m", age="50",
@@ -1193,15 +1301,26 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     order = await feed_order(M_SAMARA)
     check(set(order[:2]) == {F_SAMARA, F_REGION},
           "житель Самары первыми видит Самару и тех, кто указал область")
-    check(order[2:] == [F_TLT, F_MSK], f"дальше область, потом другой город: {order}")
-    captions = {c.caption: c for c in h.session.of_type("SendPhoto")
-                if c.chat_id == M_SAMARA and c.caption}
+    check(order[2:] == [F_TLT], f"дальше — область: {order}")
+    captions = [c.caption for c in h.session.of_type("SendPhoto")
+                if c.chat_id == M_SAMARA and c.caption]
     tlt_card = next((cap for cap in captions if "Тольяттинка" in cap), "")
-    msk_card = next((cap for cap in captions if "Москвичка" in cap), "")
     check("дальше вся Самарская область" in tlt_card,
           "над первой анкетой из области — строка, что город кончился")
-    check("других городов" in msk_card, "над первой анкетой издалека — тоже")
+    check(h.said("Рядом анкеты закончились") and rkb.FAR_YES in h.keyboard(M_SAMARA),
+          "область кончилась — бот предлагает соседние области")
+    check(not h.said("Москвичка"), "без согласия дальние анкеты не показаны")
+    h.clear()
+
+    await h.press(M_SAMARA, rkb.FAR_YES)
+    check((await h.state_data(M_SAMARA)).get("current") == F_MSK,
+          "после согласия — анкеты из соседних областей")
+    msk_card = h.session.last("SendPhoto").caption or ""
+    check("соседних областей" in msk_card, "над первой такой анкетой — строка об этом")
     check("км от вас" in msk_card, "у анкеты из другого города видно расстояние")
+    check((await users_repo.get_user(M_SAMARA))["search_scope"] == users_repo.SCOPE_ALL,
+          "согласие запомнено")
+    await h.press(M_SAMARA, rkb.DISLIKE)
     check(h.said("Вы посмотрели все анкеты"), "в конце — новый экран, а не «😔 закончились»")
     reset_button = rkb.counted(rkb.RESET_SKIPS, 4)
     check(reset_button in h.keyboard(M_SAMARA), "в конце можно вернуть пропущенных")
@@ -1209,21 +1328,26 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     h.clear()
 
     order = await feed_order(M_REGION)
-    check(set(order[:3]) == {F_SAMARA, F_REGION, F_TLT},
+    check(set(order) == {F_SAMARA, F_REGION, F_TLT},
           "кто указал область, видит всю область сразу")
-    check(order[3:] == [F_MSK], "другие регионы — после неё")
+    await h.press(M_REGION, rkb.FAR_YES)
+    check((await h.state_data(M_REGION)).get("current") == F_MSK,
+          "другие регионы — после неё и после вопроса")
     h.clear()
 
     await h.press(M_SAMARA, reset_button)
     check((await h.state_data(M_SAMARA)).get("current") in {F_SAMARA, F_REGION},
           "пропущенные вернулись, лента началась заново со своих")
+    for _ in range(3):
+        await h.press(M_SAMARA, rkb.DISLIKE)
+    check((await h.state_data(M_SAMARA)).get("current") == F_MSK,
+          "согласившись однажды, дальше лента идёт к соседним сама")
     cfg.af_fast_streak = saved[0]
     h.clear()
 
     # Прежняя версия записывала область как город с другим регистром
     await make_profile(F_LEGACY, gender="f", name="Старожилка", city="Самарская Область",
-                       region="Самарская область", lat=53.1959, lon=50.1002,
-                       age=50, age_min=48, age_max=52)
+                       region="Самарская область", lat=53.1959, lon=50.1002, age=50)
     rows = await users_repo.search_candidates(await users_repo.get_user(M_SAMARA))
     tiers = {int(r["id"]): int(r["area_tier"]) for r in rows}
     check(tiers.get(F_LEGACY) == users_repo.AREA_LOCAL,
@@ -1249,6 +1373,27 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     check(callbacks == {"onb:accept"},
           f"inline-кнопка с действием одна — «Принимаю» ({sorted(callbacks)})")
     check(urls <= {"https://t.me/example"}, "остальные inline — только ссылки под рекламой")
+
+    # ── 29. Кнопки не обходят проверки ──────────────────────────────────────
+    section("29. Текст кнопки не открывает то, что ещё рано")
+    await h.text(SNEAKY, rkb.NEXT, username="sneaky")
+    check(bool(h.session.of_type("SendPhoto")) and not h.said("мошенник"),
+          "«Далее» до капчи — сначала капча, а не правила")
+    await h.click(SNEAKY, "onb:accept", username="sneaky")
+    check((await users_repo.get_user(SNEAKY))["rules_accepted"] == 0,
+          "поддельное «Принимаю» до капчи не засчитано")
+    h.clear()
+
+    sneaky_key = StorageKey(bot_id=h.bot.id, chat_id=SNEAKY, user_id=SNEAKY)
+    await h.dp.storage.set_state(sneaky_key, None)
+    await h.text(SNEAKY, rkb.REFILL_PROFILE, username="sneaky")
+    check(not h.said("Шаг 1 из 7"), "«Заполнить анкету заново» без анкеты не открывает шаги")
+    await h.dp.storage.set_state(sneaky_key, None)
+    await h.text(SNEAKY, rkb.VERIFY, username="sneaky")
+    await h.text(SNEAKY, rkb.VERIFY_SEND, username="sneaky")
+    requested = await db.fetchone("SELECT 1 FROM verifications WHERE user_id = ?", (SNEAKY,))
+    check(requested is None, "без анкеты заявку на верификацию не создать")
+    h.clear()
 
     print(f"\n\033[1mИтог: {passed} успешно, {failed} с ошибкой\033[0m")
     return 1 if failed else 0

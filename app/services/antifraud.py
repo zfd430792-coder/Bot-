@@ -32,7 +32,7 @@ from app.db import moderation as mod_repo
 from app.db import users as users_repo
 from app.db.database import db
 from app.keyboards import reply as rkb
-from app.services.notify import notify_admins, safe_send
+from app.services.notify import appeal_contact, notify_admins, safe_send
 
 log = logging.getLogger(__name__)
 
@@ -181,7 +181,7 @@ async def punish(bot: Bot, user_id: int, verdict: Verdict,
             "🚫 <b>Доступ заблокирован автоматически</b>\n\n"
             f"Причина: {REASON_TEXT[verdict.reason]}.\n"
             + (f"Срок: до {until} (UTC).\n" if until else "Срок: бессрочно.\n")
-            + "\nЕсли считаете это ошибкой — напишите администратору.",
+            + f"\nЕсли считаете это ошибкой — {await appeal_contact()}.",
             rkb.REMOVE,
         )
         note = (f"🚫 бан на {settings.af_ban_hours} ч" if until

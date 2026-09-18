@@ -18,6 +18,7 @@ from aiogram.types import CallbackQuery, Message, TelegramObject
 from app import texts
 from app.keyboards import reply as rkb
 from app.services import screen
+from app.services.notify import appeal_contact
 from app.states import Onboarding, Verification
 
 # Нажатия, которые пропускаем мимо проверок — иначе из блокировки не выбраться
@@ -65,7 +66,8 @@ class AccessGateMiddleware(BaseMiddleware):
             if user["banned_until"]:
                 until = f"\n<b>Действует до:</b> {user['banned_until']} (UTC)"
             await _reply(event, data, texts.BANNED.format(
-                reason=user["ban_reason"] or "нарушение правил", until=until), rkb.REMOVE)
+                reason=user["ban_reason"] or "нарушение правил", until=until,
+                contact=await appeal_contact()), rkb.REMOVE)
             return None
 
         # 2. Без username знакомство не состоится — писать друг другу нечем

@@ -13,7 +13,7 @@ UPDATABLE = {
     "username", "tg_name", "captcha_passed", "rules_accepted", "registered",
     "name", "gender", "looking_for", "age", "about", "media_type", "media_id",
     "city", "region", "country", "lat", "lon", "geo_source", "search_scope",
-    "search_radius", "age_min", "age_max", "is_active", "is_banned",
+    "is_active", "is_banned",
     "ban_reason", "banned_until", "verify_status", "verify_code", "verified_at",
     "verify_forced", "likes_today", "likes_date", "likes_received",
     "matches_count", "views_count", "reports_count",
@@ -146,39 +146,55 @@ async def consume_like(user_id: int, limit: int) -> bool:
 
 # ───────────────────────────── Подбор анкет ─────────────────────────────────
 
-# Ступени ленты: свой район -> своя область -> все остальные по расстоянию
+# Ступени ленты: свой город -> своя область -> соседние области по расстоянию
 AREA_LOCAL, AREA_REGION, AREA_FAR = 1, 2, 3
+
+# search_scope: SCOPE_ALL — человек согласился смотреть соседние области.
+# Иначе лента, пройдя город и область, сначала спросит его об этом.
+SCOPE_HOME, SCOPE_ALL = "city", "all"
+
+# Кого показывать по возрасту: от года младше до двух лет старше —
+# написали «18», лента ищет от 17 до 20
+AGE_BELOW, AGE_ABOVE = 1, 2
+
+
+def age_window(age: int | None) -> tuple[int, int]:
+    if not age:
+        return 0, 999      # анкета не дописана — возраст не ограничиваем
+    return int(age) - AGE_BELOW, int(age) + AGE_ABOVE
+
+
+def far_allowed(user: Mapping[str, Any]) -> bool:
+    return user["search_scope"] == SCOPE_ALL
 
 
 async def search_candidates(user: Mapping[str, Any], limit: int = 25) -> list[aiosqlite.Row]:
     """Анкеты для ленты — от ближних к дальним, как в Дайвинчике.
 
-    Жёстко отсекаются только пол, возраст, баны и уже просмотренные. География —
-    не фильтр, а порядок: сначала «свой район» (город, область или радиус —
-    как выбрал человек), затем его область, затем все остальные по расстоянию.
-    Поэтому лента не обрывается, когда в городе закончились анкеты.
+    Жёстко отсекаются только пол, возраст (age_window), баны и уже
+    просмотренные. География — не фильтр, а порядок: сначала свой город,
+    затем своя область, затем соседние области по расстоянию. Дальние в
+    выдаче есть всегда — так лента знает, есть ли что предложить, когда своя
+    область кончится (см. browse.show_next).
 
     Свой город понимается так, как люди его указали: кто написал только
     область («Самарская область»), попадает в ленту к жителям Самары, и
     наоборот — хотя названия и не совпадают.
 
-    В колонке area_tier — ступень (AREA_*). Кто уже поставил нам ❤️, идёт
-    первым на любом расстоянии: так быстрее случаются совпадения.
+    В колонке area_tier — ступень (AREA_*).
     """
-    scope = user["search_scope"] or "city"
+    age_min, age_max = age_window(user["age"])
     params: dict[str, Any] = {
         "me": user["id"],
         "my_gender": user["gender"],
         "want": user["looking_for"] or "any",
-        "age_min": user["age_min"] or 18,
-        "age_max": user["age_max"] or 99,
-        "my_age": user["age"],
+        "age_min": age_min,
+        "age_max": age_max,
         "lat": user["lat"],
         "lon": user["lon"],
         "city": user["city"],
         "region": user["region"],
         "country": user["country"],
-        "radius": int(user["search_radius"] or 50),
         "limit": limit,
     }
 
@@ -191,68 +207,53 @@ async def search_candidates(user: Mapping[str, Any], limit: int = 25) -> list[ai
         "(:want = 'any' OR u.gender = :want)",
         "(u.looking_for = 'any' OR u.looking_for = :my_gender)",
         "u.age BETWEEN :age_min AND :age_max",
-        ":my_age BETWEEN COALESCE(u.age_min, 18) AND COALESCE(u.age_max, 99)",
         "NOT EXISTS (SELECT 1 FROM reactions r WHERE r.from_id = :me AND r.to_id = u.id)",
     ]
 
     same_region = "(u.region IS NOT NULL AND u.region = :region AND u.country IS :country)"
-    if scope == "near" and user["lat"] is not None and user["lon"] is not None:
-        area = "dist_km(u.lat, u.lon, :lat, :lon) <= :radius"
-    elif scope == "region" and user["region"]:
-        area = same_region
-    else:
-        # Тот же город — или кто-то из двоих указал область целиком
-        area = (
-            "(u.country IS :country AND :city IS NOT NULL"
-            " AND norm(u.city) = norm(:city))"
-            f" OR ({same_region} AND (norm(u.city) = norm(u.region)"
-            " OR norm(:city) = norm(:region)))"
-        )
+    # Тот же город — или кто-то из двоих указал область целиком
+    local = (
+        "(u.country IS :country AND :city IS NOT NULL"
+        " AND norm(u.city) = norm(:city))"
+        f" OR ({same_region} AND (norm(u.city) = norm(u.region)"
+        " OR norm(:city) = norm(:region)))"
+    )
 
     sql = f"""
         SELECT * FROM (
             SELECT u.*,
-                   EXISTS(SELECT 1 FROM reactions r2
-                          WHERE r2.from_id = u.id AND r2.to_id = :me
-                            AND r2.kind = 'like') AS liked_me,
                    dist_km(u.lat, u.lon, :lat, :lon) AS distance,
-                   CASE WHEN {area} THEN {AREA_LOCAL}
+                   CASE WHEN {local} THEN {AREA_LOCAL}
                         WHEN {same_region} THEN {AREA_REGION}
                         ELSE {AREA_FAR} END AS area_tier
             FROM users u
             WHERE {' AND '.join(where)}
         )
-        ORDER BY liked_me DESC, area_tier, distance IS NULL, distance, last_active DESC
+        ORDER BY area_tier, distance IS NULL, distance, last_active DESC
         LIMIT :limit
     """
     return await db.fetchall(sql, params)
 
 
-async def count_matches(user_id: int) -> int:
-    return int(await db.fetchval(
-        """
-        SELECT COUNT(*) FROM matches m
-        JOIN users u ON u.id = CASE WHEN m.user_a = :me THEN m.user_b ELSE m.user_a END
-        WHERE (m.user_a = :me OR m.user_b = :me) AND u.is_banned = 0
-        """,
-        {"me": user_id}, default=0,
-    ))
+# Кто лайкнул нас, а мы ещё не ответили. Отдельного раздела для них нет:
+# лента показывает их первыми — где бы они ни жили и сколько бы им ни было
+PENDING_LIKES = """
+    FROM reactions r
+    JOIN users u ON u.id = r.from_id
+    WHERE r.to_id = :me AND r.kind = 'like'
+      AND u.is_banned = 0 AND u.is_active = 1 AND u.registered = 1
+      AND u.verify_forced = 0
+      AND NOT EXISTS (SELECT 1 FROM reactions r2
+                      WHERE r2.from_id = :me AND r2.to_id = u.id)
+"""
 
 
 async def incoming_likes(user_id: int, limit: int = 25) -> list[aiosqlite.Row]:
-    """Анкеты тех, кто лайкнул нас, а мы ещё не ответили."""
+    """Анкеты тех, кто лайкнул нас и ждёт ответа — свежие первыми."""
     return await db.fetchall(
-        """
-        SELECT u.*, r.created_at AS liked_at, r.note AS like_note,
-               dist_km(u.lat, u.lon,
-                       (SELECT lat FROM users WHERE id = :me),
-                       (SELECT lon FROM users WHERE id = :me)) AS distance
-        FROM reactions r
-        JOIN users u ON u.id = r.from_id
-        WHERE r.to_id = :me AND r.kind = 'like'
-          AND u.is_banned = 0 AND u.is_active = 1 AND u.registered = 1
-          AND NOT EXISTS (SELECT 1 FROM reactions r2
-                          WHERE r2.from_id = :me AND r2.to_id = u.id)
+        f"""
+        SELECT u.*, r.created_at AS liked_at, r.note AS like_note
+        {PENDING_LIKES}
         ORDER BY r.created_at DESC
         LIMIT :limit
         """,
@@ -261,30 +262,8 @@ async def incoming_likes(user_id: int, limit: int = 25) -> list[aiosqlite.Row]:
 
 
 async def count_incoming_likes(user_id: int) -> int:
-    return int(await db.fetchval(
-        """
-        SELECT COUNT(*) FROM reactions r
-        JOIN users u ON u.id = r.from_id
-        WHERE r.to_id = ? AND r.kind = 'like' AND u.is_banned = 0 AND u.is_active = 1
-          AND NOT EXISTS (SELECT 1 FROM reactions r2
-                          WHERE r2.from_id = ? AND r2.to_id = u.id)
-        """,
-        (user_id, user_id), default=0,
-    ))
-
-
-async def get_matches(user_id: int, limit: int = 50) -> list[aiosqlite.Row]:
-    return await db.fetchall(
-        """
-        SELECT u.*, m.created_at AS matched_at
-        FROM matches m
-        JOIN users u ON u.id = CASE WHEN m.user_a = :me THEN m.user_b ELSE m.user_a END
-        WHERE (m.user_a = :me OR m.user_b = :me) AND u.is_banned = 0
-        ORDER BY m.created_at DESC
-        LIMIT :limit
-        """,
-        {"me": user_id, "limit": limit},
-    )
+    return int(await db.fetchval(f"SELECT COUNT(*) {PENDING_LIKES}",
+                                 {"me": user_id}, default=0))
 
 
 async def audience_ids(audience: str, extra: str | None = None) -> list[int]:

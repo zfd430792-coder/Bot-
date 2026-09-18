@@ -1,8 +1,9 @@
-"""Главное меню, справка и список пар.
+"""Главное меню и поддержка.
 
-Меню — сообщение «Выберите, что нужно» с нижними кнопками разделов. Каждый
-переход присылает новый экран вместо прежнего, поэтому в чате всегда одно
-сообщение бота, а не история нажатий.
+Меню — сообщение «Выберите, что нужно» с нижними кнопками: анкеты, своя
+анкета и поддержка. Настроек нет — лента сама идёт от ближних к дальним.
+Лайки и пары отдельными разделами не живут: кто лайкнул, тот первым в
+ленте, а контакт пары бот присылает сразу при совпадении.
 """
 from __future__ import annotations
 
@@ -14,10 +15,10 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from app import texts
-from app.config import get_settings
+from app.db import moderation as mod_repo
 from app.db import users as users_repo
 from app.keyboards import reply as rkb
-from app.services import profile, screen
+from app.services import screen
 
 router = Router(name="menu")
 
@@ -35,52 +36,27 @@ async def show_menu(bot: Bot, chat_id: int, state: FSMContext,
                           rkb.START_AGAIN)
         return
 
-    likes = await users_repo.count_incoming_likes(fresh["id"])
-    matches = await users_repo.count_matches(fresh["id"])
+    # Пока контакт поддержки не указан, кнопку видит только владелец
+    support = is_admin or bool(await mod_repo.support_username())
     is_moderator = bool(fresh["is_moderator"]) and not is_admin
     await screen.send(bot, chat_id, state, lead + texts.MAIN_MENU,
-                      rkb.main_menu(likes, matches, is_admin=is_admin,
+                      rkb.main_menu(support=support, is_admin=is_admin,
                                     is_moderator=is_moderator))
 
 
-# ─────────────────────────────── Справка ────────────────────────────────────
-
+@router.message(Command("support"))
 @router.message(Command("help"))
-@router.message(F.text == rkb.HELP)
-async def show_help(message: Message, state: FSMContext) -> None:
-    await screen.drop(message)
-    await screen.send(message.bot, message.chat.id, state,
-                      texts.HELP.format(limit=get_settings().likes_limit_per_day),
-                      rkb.HOME_ONLY)
-
-
-# ──────────────────────────────── Пары ──────────────────────────────────────
-
-async def matches_text(user_id: int) -> str | None:
-    rows = await users_repo.get_matches(user_id)
-    if not rows:
-        return None
-    lines = ["💬 <b>Взаимные симпатии</b>\n",
-             "<i>Напишите первым — это работает лучше, чем ждать.</i>\n"]
-    for row in rows:
-        link = f"@{row['username']}" if row["username"] else "профиль скрыт"
-        verified = f" {texts.VERIFY_BADGE}" if row["verify_status"] == "verified" else ""
-        lines.append(
-            f"{profile.GENDER_EMOJI.get(row['gender'], '•')} "
-            f"<b>{profile.esc(row['name'])}</b>, {row['age']}{verified} — {link}"
-        )
-    return "\n".join(lines)
-
-
-@router.message(F.text.startswith(rkb.MATCHES))
-@router.message(F.text == rkb.MATCHES_OLD)
-async def show_matches(message: Message, state: FSMContext,
+@router.message(F.text == rkb.SUPPORT)
+async def show_support(message: Message, state: FSMContext,
                        user: Mapping[str, Any], is_admin: bool) -> None:
     await screen.drop(message)
-    text = await matches_text(user["id"])
-    if text is None:
-        # Пустой раздел не стоит отдельного экрана — меню с подсказкой
-        await show_menu(message.bot, message.chat.id, state, user, is_admin,
-                        note=texts.NO_MATCHES)
-        return
-    await screen.send(message.bot, message.chat.id, state, text, rkb.HOME_ONLY)
+    await state.clear()     # иначе, скажем, ждущий текст к лайку принял бы за него ответ
+    bot, chat_id = message.bot, message.chat.id
+    username = await mod_repo.support_username()
+    if username:
+        await screen.send(bot, chat_id, state,
+                          texts.SUPPORT.format(username=username), rkb.HOME_ONLY)
+    elif is_admin:
+        await screen.send(bot, chat_id, state, texts.SUPPORT_NOT_SET, rkb.SUPPORT_SETUP)
+    else:
+        await show_menu(bot, chat_id, state, user, is_admin)
