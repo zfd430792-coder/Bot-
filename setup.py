@@ -200,8 +200,10 @@ def api_call(token: str, method: str, params: dict | None = None,
             payload = json.loads(response.read().decode())
         return payload if payload.get("ok") else None
     except urllib.error.HTTPError as exc:
-        if exc.code == 401:
-            return {"ok": False, "error_code": 401}
+        # 401 — токен отозван или с опечаткой; 409 — этого бота уже слушает
+        # запущенная копия, и getUpdates достаётся ей
+        if exc.code in (401, 409):
+            return {"ok": False, "error_code": exc.code}
         return None
     except Exception:
         return None
@@ -243,6 +245,11 @@ def detect_admin(token: str, bot_username: str, seconds: int = 120) -> dict | No
 
             result = api_call(token, "getUpdates",
                               {"offset": offset, "timeout": 0, "limit": 10})
+            if result and result.get("error_code") == 409:
+                spinner.clear()
+                warn("Бот уже запущен и сам забирает сообщения — поймать ваше не выйдет.")
+                hint("Остановите его на время настройки: systemctl stop dating-bot")
+                return None
             for update in (result or {}).get("result", []):
                 offset = update["update_id"] + 1
                 message = update.get("message") or update.get("edited_message")
@@ -427,7 +434,7 @@ def ask_admins(token: str, bot_username: str, existing: str) -> str:
                 p.strip() for p in extra.replace(";", ",").split(",") if p.strip()
             ]
             return ",".join(dict.fromkeys(ids))
-        warn("Сообщение так и не пришло — введите ID вручную.")
+        warn("ID определить не удалось — введите его вручную.")
         print()
 
     info("Узнать свой ID: напишите @userinfobot, он пришлёт число.")
@@ -576,10 +583,15 @@ def main() -> int:
 
     # install.sh печатает свои подсказки сам — не повторяемся
     if not os.environ.get("DATING_BOT_FROM_INSTALLER"):
-        launcher = (".venv/bin/python main.py" if (BASE / ".venv").is_dir()
-                    else "python3 main.py")
-        print(f"  {S.bold('Запустить бота:')}")
-        print(f"     {S.blue(launcher)}")
+        if Path("/etc/systemd/system/dating-bot.service").is_file():
+            # Бот уже служба: новые настройки подхватятся только после перезапуска
+            print(f"  {S.bold('Применить настройки:')}")
+            print(f"     {S.blue('systemctl restart dating-bot')}")
+        else:
+            launcher = (".venv/bin/python main.py" if (BASE / ".venv").is_dir()
+                        else "python3 main.py")
+            print(f"  {S.bold('Запустить бота:')}")
+            print(f"     {S.blue(launcher)}")
         print()
     if bot_username:
         print(f"  Потом откройте {S.bold('@' + bot_username)} и нажмите "

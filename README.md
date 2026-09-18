@@ -17,16 +17,29 @@
 
 ## Быстрый старт
 
-Одна команда — и бот готов к запуску:
+Нужен сервер на Ubuntu 22.04+ или Debian 12+ и токен бота от
+[@BotFather](https://t.me/BotFather). Остальное установщик сделает сам —
+на сервере достаточно одной команды:
 
 ```bash
-git clone https://github.com/zfd430792-coder/Bot-.git && cd Bot- && bash install.sh
+curl -fsSL https://raw.githubusercontent.com/zfd430792-coder/Bot-/HEAD/install.sh | bash
 ```
 
-Установщик сам проверит Python, создаст виртуальное окружение, поставит
-библиотеки, поднимет Redis (предложит сделать это в Docker) и запустит мастер
-настройки. Мастер по шагам спросит токен и ваш ID, проверит их на месте и
-соберёт готовый `.env`:
+По шагам:
+
+1. **Системные пакеты** — ставит git, Python с `venv` и Redis, если их нет,
+   и включает Redis в автозагрузку. Если `apt` занят автообновлениями Ubuntu
+   (частая история на только что созданном сервере), ждёт, а не падает.
+2. **Код** — скачивает проект в `~/Bot-`.
+3. **Python-окружение** — создаёт `.venv` и ставит библиотеки.
+4. **Настройка** — мастер спрашивает токен и ваш ID (как это выглядит — ниже).
+5. **Запуск** — регистрирует бота службой systemd `dating-bot`: он работает
+   после закрытия SSH, сам поднимается после перезагрузки и перезапускается
+   при сбое. Установщик дожидается, пока бот подключится к Telegram, а если
+   запуск не удался, показывает причину из журнала и подсказывает, что делать.
+
+Мастер по шагам спросит токен и ваш ID, проверит их на месте и соберёт
+готовый `.env`:
 
 ```
 ┌ Шаг 1 из 4 ────────────────────────────────────────────────────┐
@@ -46,15 +59,39 @@ git clone https://github.com/zfd430792-coder/Bot-.git && cd Bot- && bash install
   опечатку видно сразу, а не при первом запуске;
 * **определяет ваш ID сам**: предложит написать боту любое сообщение и
   возьмёт ID оттуда. Не нужно искать @userinfobot;
-* **поднимает Redis** в Docker одной кнопкой, если его нет;
+* **проверяет Redis** — установщик уже поставил его, а если бот смотрит на
+  другой адрес и там никто не отвечает, мастер предложит варианты;
 * **бережёт комментарии** — генерируется полный `.env` со всеми пояснениями,
   а файл закрывается правами `600`, потому что в нём лежит токен.
 
-Перенастроить потом можно в любой момент — мастер подставит текущие значения
-и предложит их изменить:
+### Обновление
+
+Та же команда. Установщик подтянет свежий код с GitHub, доставит библиотеки,
+если поменялся `requirements.txt`, и перезапустит бота. Настройки (`.env`) и
+база (`data/bot.db`) не трогаются, мастер второй раз ничего не спрашивает.
+Если обновлять нечего, бот не перезапускается.
+
+Правки в коде, сделанные прямо на сервере, не теряются: установщик
+откладывает их в `git stash` и пишет, как вернуть.
+
+### Управление
+
+| Что сделать | Команда |
+|---|---|
+| Журнал бота | `journalctl -u dating-bot -f` |
+| Перезапустить | `systemctl restart dating-bot` |
+| Остановить / запустить | `systemctl stop dating-bot` · `systemctl start dating-bot` |
+| Сменить токен или админов | `curl -fsSL …/install.sh \| bash -s -- --reconfigure` |
+| Лог установки | `/var/log/dating-bot-install.log` |
+
+Мастер подставляет текущие значения, так что при перенастройке можно
+поменять что-то одно, а остальное оставить.
+
+Необязательные переменные: `BOT_DIR` (папка проекта, по умолчанию `~/Bot-`),
+`BOT_SERVICE` (имя службы), `BOT_BRANCH` (ветка). Например, поставить в `/opt`:
 
 ```bash
-.venv/bin/python setup.py
+curl -fsSL https://raw.githubusercontent.com/zfd430792-coder/Bot-/HEAD/install.sh | BOT_DIR=/opt/dating-bot bash
 ```
 
 <details>
@@ -62,17 +99,19 @@ git clone https://github.com/zfd430792-coder/Bot-.git && cd Bot- && bash install
 
 ```bash
 # Redis обязателен: в нём живут незаконченные диалоги
-docker run -d -p 6379:6379 --name dating-redis redis:7-alpine
-#  либо:  sudo apt install redis-server && sudo systemctl enable --now redis
+sudo apt update
+sudo apt install -y git python3-venv redis-server
+sudo systemctl enable --now redis-server
 
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+git clone https://github.com/zfd430792-coder/Bot-.git && cd Bot-
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 
-cp .env.example .env
-nano .env          # вписать BOT_TOKEN и ADMIN_IDS
-
-python3 main.py
+.venv/bin/python setup.py     # мастер: токен и админы
+.venv/bin/python main.py
 ```
+
+Чтобы бот работал постоянно, оформите его службой — см. «Запуск на сервере».
 </details>
 
 Если Redis не поднят, бот при старте скажет об этом прямым текстом и не
@@ -461,7 +500,7 @@ GEOCODER_EMAIL=you@example.com
 ## Структура проекта
 
 ```
-install.sh                  установка одной командой
+install.sh                  установка и обновление одной командой
 setup.py                    мастер настройки (.env по шагам)
 main.py                     запуск бота
 app/
@@ -553,18 +592,22 @@ python3 tests/setup_test.py       # диалог мастера, .env и вёр�
 
 ## Запуск на сервере
 
+Службу `dating-bot` создаёт установщик — руками ничего писать не нужно.
+Для справки, вот что он кладёт в `/etc/systemd/system/dating-bot.service`
+(файл перезаписывается при обновлении, свои добавки — через
+`systemctl edit dating-bot`):
+
 ```ini
-# /etc/systemd/system/dating-bot.service
 [Unit]
 Description=Telegram dating bot
 After=network-online.target redis-server.service
-Wants=redis-server.service
+Wants=network-online.target redis-server.service
 
 [Service]
 Type=simple
-User=botuser
-WorkingDirectory=/opt/dating-bot
-ExecStart=/opt/dating-bot/.venv/bin/python main.py
+WorkingDirectory=/root/Bot-
+ExecStart=/root/Bot-/.venv/bin/python main.py
+Environment=PYTHONUNBUFFERED=1
 Restart=always
 RestartSec=5
 
@@ -572,9 +615,12 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
+Если папка проекта принадлежит не root, установщик добавит `User=` с её
+владельцем.
+
 ```bash
-sudo systemctl enable --now dating-bot
-sudo journalctl -u dating-bot -f
+systemctl status dating-bot
+journalctl -u dating-bot -f
 ```
 
 Резервная копия — это один файл (`data/bot.db`): в Redis лежат только

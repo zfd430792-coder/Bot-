@@ -157,6 +157,24 @@ def main() -> int:
     check("уже есть" in text, "мастер заметил существующий .env")
     check(env_values(box)["ADMIN_IDS"] == "777001", "прежние значения сохранены")
 
+    # ── Бот уже запущен: его копия забирает getUpdates ──────────────────────
+    section("Мастер: бот уже запущен")
+    box = sandbox()
+    setup.api_call = fake_api({
+        "getMe": {"ok": True, "result": {"username": "my_dating_bot",
+                                         "first_name": "Знакомства"}},
+        "getUpdates": {"ok": False, "error_code": 409},
+    })
+
+    with scripted([TOKEN, "y", "900001", "n"]) as out:
+        code = setup.main()
+    text = out.getvalue()
+
+    check(code == 0, "мастер завершился успешно")
+    check("уже запущен" in text, "объяснил, почему ID не ловится")
+    check("systemctl stop" in text, "подсказал, как остановить бота")
+    check(env_values(box)["ADMIN_IDS"] == "900001", "ID введён вручную и записан")
+
     # ── Отбраковка мусора ───────────────────────────────────────────────────
     section("Проверка ввода")
     check(not setup.TOKEN_RE.match("просто текст"), "текст вместо токена отбраковывается")

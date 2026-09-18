@@ -1,0 +1,2 @@
+# Скрипты запускаются на Linux: с CRLF из Windows-копии bash падает на «\r»
+*.sh text eol=lf
