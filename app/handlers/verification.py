@@ -3,6 +3,9 @@
 Два сценария:
 * пользователь сам просит галочку — бот работает как обычно;
 * администратор требует проверку — бот закрыт до подтверждения (см. gates.py).
+
+Заявки администратор разбирает в админке («✅ Верификация»), сюда ему
+приходит только короткое уведомление с фото.
 """
 from __future__ import annotations
 
@@ -11,13 +14,13 @@ from typing import Any, Mapping
 
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import Message
 
 from app import texts
 from app.config import Settings, get_settings
 from app.db import moderation as mod_repo
 from app.db import users as users_repo
-from app.keyboards import inline as kb
+from app.keyboards import reply as rkb
 from app.services import profile as profile_service
 from app.services import screen
 from app.services.notify import safe_send
@@ -55,26 +58,32 @@ async def request_verification(bot: Bot, user_id: int, *, forced: bool,
                              admin_id=admin_id)
 
     if notify:
-        text = (texts.VERIFY_REQUIRED if forced else texts.VERIFY_SELF).format(code=code)
-        await safe_send(bot, user_id, text, kb.VERIFY_START)
+        if forced:
+            await safe_send(bot, user_id, texts.VERIFY_REQUIRED.format(code=code),
+                            rkb.VERIFY_REQUIRED)
+        else:
+            await safe_send(bot, user_id, texts.VERIFY_SELF.format(code=code),
+                            rkb.VERIFY_SELF)
     return code
 
 
 # ────────────────────── Пользователь начинает проверку ──────────────────────
 
-@router.callback_query(F.data == "pr:verify")
-async def self_request(call: CallbackQuery, state: FSMContext, bot: Bot,
+@router.message(F.text == rkb.VERIFY)
+async def self_request(message: Message, state: FSMContext, bot: Bot,
                        user: Mapping[str, Any]) -> None:
+    await screen.drop(message)
+    chat_id = message.chat.id
     if user["verify_status"] == "verified":
-        await call.answer(texts.VERIFY_ALREADY, show_alert=True)
+        await screen.send(bot, chat_id, state, texts.VERIFY_ALREADY, rkb.HOME_ONLY)
         return
     code = await request_verification(bot, user["id"], forced=False, notify=False)
     if code is None:
-        await call.answer("Вы владелец бота — верификация вам не нужна.", show_alert=True)
+        await screen.send(bot, chat_id, state,
+                          "Вы владелец бота — верификация вам не нужна.", rkb.HOME_ONLY)
         return
-    await call.answer()
-    await screen.show(bot, call.message.chat.id, state,
-                      texts.VERIFY_SELF.format(code=code), kb.VERIFY_SELF)
+    await screen.send(bot, chat_id, state, texts.VERIFY_SELF.format(code=code),
+                      rkb.VERIFY_SELF)
 
 
 def _upload_prompt(code: str, error: str | None = None) -> str:
@@ -82,33 +91,34 @@ def _upload_prompt(code: str, error: str | None = None) -> str:
     return f"⚠️ {error}\n\n{text}" if error else text
 
 
-@router.callback_query(F.data == "ver:start")
-async def start_upload(call: CallbackQuery, state: FSMContext,
+@router.message(F.text == rkb.VERIFY_SEND)
+async def start_upload(message: Message, state: FSMContext,
                        user: Mapping[str, Any]) -> None:
+    await screen.drop(message)
     fresh = await users_repo.get_user(user["id"])
     code = fresh["verify_code"] or new_code()
     if not fresh["verify_code"]:
         await users_repo.update_user(user["id"], verify_code=code)
 
     await state.set_state(Verification.waiting_media)
-    await call.answer()
-    await screen.show(call.bot, call.message.chat.id, state,
-                      _upload_prompt(code), kb.VERIFY_CANCEL)
+    await screen.send(message.bot, message.chat.id, state,
+                      _upload_prompt(code), rkb.CANCEL_ONLY)
 
 
-@router.callback_query(F.data == "ver:cancel", Verification.waiting_media)
-async def cancel_upload(call: CallbackQuery, state: FSMContext,
+@router.message(Verification.waiting_media, F.text == rkb.CANCEL)
+async def cancel_upload(message: Message, state: FSMContext,
                         user: Mapping[str, Any]) -> None:
+    await screen.drop(message)
     await state.clear()
-    await call.answer(texts.CANCELLED)
-    if user["verify_forced"]:
-        await screen.show(call.bot, call.message.chat.id, state,
-                          texts.VERIFY_REQUIRED.format(code=user["verify_code"] or "—"),
-                          kb.VERIFY_START)
+    fresh = await users_repo.get_user(user["id"])
+    if fresh["verify_forced"]:
+        await screen.send(message.bot, message.chat.id, state,
+                          texts.VERIFY_REQUIRED.format(code=fresh["verify_code"] or "—"),
+                          rkb.VERIFY_REQUIRED)
         return
     # Проверку просили сами, из анкеты — туда и возвращаем
     from app.handlers import profile as profile_handlers
-    await profile_handlers.show_profile(call.bot, call.message.chat.id, state, user["id"])
+    await profile_handlers.show_profile(message.bot, message.chat.id, state, user["id"])
 
 
 @router.message(Verification.waiting_media)
@@ -117,10 +127,10 @@ async def receive_media(message: Message, state: FSMContext, bot: Bot,
     result = profile_service.extract_media(message, max_seconds=60)
     await screen.drop(message)
     if isinstance(result, str):
-        await screen.show(bot, message.chat.id, state,
+        await screen.send(bot, message.chat.id, state,
                           _upload_prompt(user["verify_code"] or "—",
                                          texts.VERIFY_NEED_MEDIA),
-                          kb.VERIFY_CANCEL)
+                          rkb.CANCEL_ONLY)
         return
 
     media_type, media_id = result
@@ -134,7 +144,7 @@ async def receive_media(message: Message, state: FSMContext, bot: Bot,
 
     await users_repo.update_user(user["id"], verify_status="pending")
     await state.clear()
-    await screen.show(bot, message.chat.id, state, texts.VERIFY_SENT, kb.BACK_HOME)
+    await screen.send(bot, message.chat.id, state, texts.VERIFY_SENT, rkb.HOME_ONLY)
 
     fresh = await users_repo.get_user(user["id"])
     header = (
@@ -142,21 +152,17 @@ async def receive_media(message: Message, state: FSMContext, bot: Bot,
         f"Пользователь: <b>{profile_service.esc(fresh['name'] or fresh['tg_name'])}</b>\n"
         f"<code>{fresh['id']}</code> @{fresh['username'] or '—'}\n"
         f"Код на фото должен быть: <code>{record['code']}</code>\n"
-        f"Тип заявки: {'запрошена админом' if record['forced'] else 'по своей инициативе'}"
+        f"Тип заявки: {'запрошена админом' if record['forced'] else 'по своей инициативе'}\n\n"
+        "<i>Решить: «🛠 Админ-панель» → «✅ Верификация».</i>"
     )
     for admin_id in settings.admin_ids:
         await safe_send(bot, admin_id, header)
         try:
             if media_type == "photo":
-                await bot.send_photo(admin_id, media_id,
-                                     reply_markup=kb.verify_review(record["id"]))
+                await bot.send_photo(admin_id, media_id)
             elif media_type == "video":
-                await bot.send_video(admin_id, media_id,
-                                     reply_markup=kb.verify_review(record["id"]))
+                await bot.send_video(admin_id, media_id)
             else:
                 await bot.send_video_note(admin_id, media_id)
-                await bot.send_message(admin_id, "Решение:",
-                                       reply_markup=kb.verify_review(record["id"]))
         except Exception:
-            await safe_send(bot, admin_id, "Не удалось показать медиа заявки.",
-                            kb.verify_review(record["id"]))
+            await safe_send(bot, admin_id, "Не удалось показать медиа заявки.")

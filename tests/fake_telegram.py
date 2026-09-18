@@ -12,7 +12,10 @@ from typing import Any, AsyncGenerator
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import TelegramMethod
-from aiogram.types import Chat, Message, MessageId, Update, User
+from aiogram.types import (
+    Chat, InlineKeyboardMarkup, Message, MessageId, ReplyKeyboardMarkup,
+    ReplyKeyboardRemove, Update, User,
+)
 
 _ids = itertools.count(1000)
 
@@ -26,6 +29,10 @@ class FakeSession(BaseSession):
         # Что сейчас видно в каждом чате: отправленное ботом минус удалённое.
         # clear() это не сбрасывает — так видно, убирает ли бот за собой.
         self.alive: dict[int, set[int]] = {}
+        # Нижняя клавиатура каждого чата: надписи кнопок или None, если снята
+        self.keyboards: dict[int, list[str] | None] = {}
+        # Все inline-кнопки, какие бот когда-либо показывал: (callback_data, url)
+        self.inline_buttons: list[tuple[str | None, str | None]] = []
 
     async def close(self) -> None:
         return None
@@ -33,6 +40,21 @@ class FakeSession(BaseSession):
     def visible(self, chat_id: int) -> int:
         """Сколько сообщений бота сейчас видно в чате."""
         return len(self.alive.get(chat_id, set()))
+
+    def keyboard(self, chat_id: int) -> list[str]:
+        """Надписи нижней клавиатуры, которая сейчас у человека."""
+        return list(self.keyboards.get(chat_id) or [])
+
+    def _track_markup(self, method: TelegramMethod) -> None:
+        markup = getattr(method, "reply_markup", None)
+        chat_id = getattr(method, "chat_id", None)
+        if isinstance(markup, ReplyKeyboardMarkup) and chat_id is not None:
+            self.keyboards[int(chat_id)] = [b.text for row in markup.keyboard for b in row]
+        elif isinstance(markup, ReplyKeyboardRemove) and chat_id is not None:
+            self.keyboards[int(chat_id)] = None
+        elif isinstance(markup, InlineKeyboardMarkup):
+            self.inline_buttons += [(b.callback_data, b.url)
+                                    for row in markup.inline_keyboard for b in row]
 
     async def stream_content(self, url: str, headers=None, timeout: int = 30,
                              chunk_size: int = 65536,
@@ -42,6 +64,7 @@ class FakeSession(BaseSession):
     async def make_request(self, bot: Bot, method: TelegramMethod,
                            timeout: int | None = None) -> Any:
         self.calls.append(method)
+        self._track_markup(method)
         name = type(method).__name__
 
         if name == "GetMe":

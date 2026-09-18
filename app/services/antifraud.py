@@ -17,7 +17,7 @@
 | второе    | автобан на сутки (срок настраивается) |
 | третье    | бессрочный бан |
 
-О каждом срабатывании уходит уведомление администратору с кнопкой разбана —
+О каждом срабатывании уходит уведомление администратору с командой разбана —
 последнее слово всегда за человеком.
 """
 from __future__ import annotations
@@ -31,7 +31,7 @@ from app.config import Settings
 from app.db import moderation as mod_repo
 from app.db import users as users_repo
 from app.db.database import db
-from app.keyboards import inline as kb
+from app.keyboards import reply as rkb
 from app.services.notify import notify_admins, safe_send
 
 log = logging.getLogger(__name__)
@@ -169,7 +169,7 @@ async def punish(bot: Bot, user_id: int, verdict: Verdict,
     if verdict.action == "captcha":
         # Мягкая мера: сбрасываем проверку, бот попросит пройти капчу заново
         await users_repo.update_user(user_id, captcha_passed=0)
-        await safe_send(bot, user_id, WARNING)
+        await safe_send(bot, user_id, WARNING, rkb.RECHECK)
         note = "🔁 сброшена капча"
     else:
         until = None
@@ -182,6 +182,7 @@ async def punish(bot: Bot, user_id: int, verdict: Verdict,
             f"Причина: {REASON_TEXT[verdict.reason]}.\n"
             + (f"Срок: до {until} (UTC).\n" if until else "Срок: бессрочно.\n")
             + "\nЕсли считаете это ошибкой — напишите администратору.",
+            rkb.REMOVE,
         )
         note = (f"🚫 бан на {settings.af_ban_hours} ч" if until
                 else "🚫 бессрочный бан")
@@ -192,8 +193,8 @@ async def punish(bot: Bot, user_id: int, verdict: Verdict,
         f"Пользователь: <code>{user_id}</code> @{username}\n"
         f"Признак: {REASON_TEXT[verdict.reason]}\n"
         f"Детали: {verdict.detail}\n"
-        f"Нарушение по счёту: <b>{verdict.strikes}</b>",
-        kb.autoban_actions(user_id),
+        f"Нарушение по счёту: <b>{verdict.strikes}</b>\n\n"
+        f"Разбанить: <code>/unban {user_id}</code> · карточка: <code>/find {user_id}</code>",
     )
     log.info("Антинакрутка: %s -> %s (%s)", user_id, verdict.action, verdict.detail)
 

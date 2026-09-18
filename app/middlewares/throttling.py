@@ -1,16 +1,19 @@
 """Простейший антифлуд: не даём дёргать бота быстрее, чем раз в N секунд."""
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware
-from aiogram.types import CallbackQuery, TelegramObject
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from app.config import get_settings
 
-# Действия, которые намеренно делают быстрыми подряд (клетки капчи, лента)
-FAST_PREFIXES = ("cap:tok:", "cap:done", "br:")
+# Нажатия, которые намеренно делают быстро подряд: номера клеток капчи и
+# кнопки ленты. Нижние кнопки приходят обычными сообщениями — узнаём по тексту.
+FAST_TEXTS = re.compile(r"^(\d{1,2}|❤️(\s*\d+)?|👎|✅ Готово)$")
 
 
 class ThrottlingMiddleware(BaseMiddleware):
@@ -34,7 +37,7 @@ class ThrottlingMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         limit = self.rate
-        if isinstance(event, CallbackQuery) and (event.data or "").startswith(FAST_PREFIXES):
+        if isinstance(event, Message) and FAST_TEXTS.match(event.text or ""):
             limit = self.fast_rate
 
         now = time.monotonic()
@@ -42,6 +45,12 @@ class ThrottlingMiddleware(BaseMiddleware):
         if now - last < limit:
             if isinstance(event, CallbackQuery):
                 await event.answer()     # просто гасим «часики», без текста
+            elif isinstance(event, Message):
+                # Лишнее нажатие не должно остаться висеть в чате
+                try:
+                    await event.delete()
+                except (TelegramBadRequest, TelegramForbiddenError):
+                    pass
             return None
         self._last[user.id] = now
 

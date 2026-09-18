@@ -1,4 +1,9 @@
-"""Админ-панель: меню, статистика, поиск пользователя, настройки бота."""
+"""Админ-панель: вход, статистика, карточка пользователя, настройки бота.
+
+Всё на нижних кнопках, как и у пользователей. Действия над конкретным
+человеком (бан, верификация, сообщение) относятся к открытой карточке:
+её id хранится в состоянии, поэтому кнопкам не нужно нести номер.
+"""
 from __future__ import annotations
 
 from typing import Any, Mapping
@@ -6,29 +11,32 @@ from typing import Any, Mapping
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import Message
 
 from app.config import Settings
 from app.db import moderation as mod_repo
 from app.db import stats as stats_repo
 from app.db import users as users_repo
-from app.handlers import menu as menu_handlers
+from app.handlers import verification as verification_handlers
 from app.handlers.admin.filters import IsAdmin, IsStaff
-from app.keyboards import inline as kb
+from app.keyboards import reply as rkb
 from app.services import profile as profile_service
 from app.services import screen
-from app.services.notify import safe_send
+from app.services.notify import admin_log, safe_send
 from app.states import AdminPanel
 
-# Панель доступна всему персоналу; кнопки владельца собираются отдельно
+# Вход в панель и «⬅️ В админку» — раньше разделов с вводом текста, иначе
+# кнопку «назад» принял бы за ответ, например, шаг рассылки
+nav_router = Router(name="staff-nav")
+nav_router.message.filter(IsStaff())
+
+# Панель доступна всему персоналу
 router = Router(name="staff-panel")
 router.message.filter(IsStaff())
-router.callback_query.filter(IsStaff())
 
 # Разделы, которые модератору недоступны
 admin_router = Router(name="admin-panel")
 admin_router.message.filter(IsAdmin())
-admin_router.callback_query.filter(IsAdmin())
 
 ADMIN_HELP = (
     "🛠 <b>Админ-панель</b>\n\n"
@@ -55,154 +63,219 @@ MOD_HELP = (
     "антинакрутка действуют и на вас.</i>"
 )
 
+BAN_REASON_HINT = (
+    "Срок можно указать в начале: <code>7d спам</code> или <code>12h реклама</code>. "
+    "Без срока — бессрочно."
+)
 
-async def panel_view(is_admin: bool) -> tuple[str, Any]:
+
+async def open_panel(bot: Bot, chat_id: int, state: FSMContext, is_admin: bool,
+                     notice: str | None = None) -> None:
+    """Главный экран админки. notice — строка о том, что сейчас сделано."""
+    await state.clear()
+    await state.set_state(AdminPanel.menu)
     reports = await mod_repo.count_open_reports()
     verify = await mod_repo.count_pending_verifications()
     text = ADMIN_HELP if is_admin else MOD_HELP
-    return text, kb.admin_menu(reports, verify, is_admin=is_admin)
+    await screen.send(bot, chat_id, state, f"{notice}\n\n{text}" if notice else text,
+                      rkb.admin_menu(reports, verify, is_admin=is_admin))
 
 
-async def open_panel(bot: Bot, chat_id: int, state: FSMContext, is_admin: bool) -> None:
-    """Панель встаёт на место главного меню, «Закрыть» возвращает меню."""
-    await state.clear()
-    await state.set_state(AdminPanel.menu)
-    text, markup = await panel_view(is_admin)
-    await screen.show(bot, chat_id, state, text, markup)
-
-
-@router.message(Command("admin"))
-@router.message(Command("mod"))
-@router.message(F.text == "🛠 Админ-панель")
-@router.message(F.text == "👮 Модератор")
-async def admin_command(message: Message, state: FSMContext, is_admin: bool) -> None:
+@nav_router.message(Command("admin"))
+@nav_router.message(Command("mod"))
+@nav_router.message(F.text.in_({rkb.ADMIN, rkb.MODERATOR, rkb.A_BACK}))
+async def admin_home(message: Message, state: FSMContext, is_admin: bool) -> None:
     await screen.drop(message)
     await open_panel(message.bot, message.chat.id, state, is_admin)
 
 
-@router.callback_query(F.data == "m:admin")
-async def admin_button(call: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
-    await call.answer()
-    await open_panel(call.bot, call.message.chat.id, state, is_admin)
-
-
-@router.callback_query(F.data == "adm:menu")
-async def back_to_menu(call: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
-    await state.set_state(AdminPanel.menu)
-    await call.answer()
-    text, markup = await panel_view(is_admin)
-    try:
-        await call.message.edit_text(text, reply_markup=markup)
-    except Exception:
-        await call.message.answer(text, reply_markup=markup)
-
-
-@router.callback_query(F.data == "adm:close")
-async def close_panel(call: CallbackQuery, state: FSMContext, user,
-                      is_admin: bool) -> None:
-    await call.answer()
-    await menu_handlers.show_menu(call.bot, call.message.chat.id, state, user, is_admin)
-
-
-# ───────────────────────────── Статистика ───────────────────────────────────
-
-@router.callback_query(F.data == "adm:stats")
-async def show_stats(call: CallbackQuery, is_admin: bool) -> None:
-    await call.answer()
-    data = await stats_repo.collect()
-    text = stats_repo.render(data) if is_admin else stats_repo.render_short(data)
-    await call.message.edit_text(text, reply_markup=kb.ADMIN_BACK)
-
-
-@router.message(Command("stats"))
-async def stats_command(message: Message, is_admin: bool) -> None:
-    data = await stats_repo.collect()
-    await message.answer(stats_repo.render(data) if is_admin
-                         else stats_repo.render_short(data))
-
-
 # ─────────────────────── Карточка пользователя ──────────────────────────────
 
-async def send_user_card(message: Message, target: Mapping[str, Any]) -> None:
-    await profile_service.send_card(
-        message.bot, message.chat.id, target, admin_view=True, show_distance=False,
-        markup=kb.admin_user_card(
-            target["id"], bool(target["is_banned"]),
-            target["verify_status"] == "verified", bool(target["verify_forced"]),
-        ),
+async def show_user_card(bot: Bot, chat_id: int, state: FSMContext,
+                         target: Mapping[str, Any], notice: str | None = None) -> None:
+    """Карточка с кнопками действий над этим человеком."""
+    await state.set_state(AdminPanel.user_card)
+    await state.update_data(card_user=target["id"])
+    message_ids = await profile_service.send_card(
+        bot, chat_id, target, admin_view=True, show_distance=False,
+        header=notice or "",
+        markup=rkb.admin_user_card(bool(target["is_banned"]),
+                                   target["verify_status"] == "verified",
+                                   bool(target["verify_forced"])),
     )
+    await screen.replace(bot, chat_id, state, message_ids)
 
 
-@router.callback_query(F.data == "adm:find")
-async def ask_user(call: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(AdminPanel.find_user)
-    await call.answer()
-    await call.message.answer("Пришлите ID или @username пользователя:")
+async def _card_user(state: FSMContext) -> Mapping[str, Any] | None:
+    return await users_repo.get_user(int((await state.get_data()).get("card_user") or 0))
 
 
-@router.message(Command("find"))
-async def find_command(message: Message, state: FSMContext) -> None:
-    parts = (message.text or "").split(maxsplit=1)
-    if len(parts) < 2:
-        await state.set_state(AdminPanel.find_user)
-        await message.answer("Пришлите ID или @username пользователя:")
-        return
-    await _lookup(message, state, parts[1])
+async def ask_ban_reason(bot: Bot, chat_id: int, state: FSMContext, target_id: int,
+                         back: str) -> None:
+    """Вопрос о причине бана. back — куда вернуться после: panel|card|report|verify."""
+    await state.set_state(AdminPanel.ban_reason)
+    await state.update_data(ban_target=target_id, ban_back=back)
+    await screen.send(bot, chat_id, state,
+                      f"Причина бана для <code>{target_id}</code>?\n\n{BAN_REASON_HINT}",
+                      rkb.ADMIN_BACK)
 
 
-@router.message(AdminPanel.find_user, F.text)
-async def find_user(message: Message, state: FSMContext) -> None:
-    await _lookup(message, state, message.text or "")
+@router.message(AdminPanel.user_card, F.text == rkb.A_BAN)
+async def card_ban(message: Message, state: FSMContext) -> None:
+    await screen.drop(message)
+    target = await _card_user(state)
+    if target is not None:
+        await ask_ban_reason(message.bot, message.chat.id, state, target["id"], "card")
 
 
-async def _lookup(message: Message, state: FSMContext, query: str) -> None:
-    target = await users_repo.find_user(query)
+@router.message(AdminPanel.user_card, F.text == rkb.A_UNBAN)
+async def card_unban(message: Message, state: FSMContext, bot: Bot) -> None:
+    await screen.drop(message)
+    target = await _card_user(state)
     if target is None:
-        await message.answer("Пользователь не найден. Попробуйте другой ID или @username.")
         return
-    await state.set_state(AdminPanel.menu)
-    await send_user_card(message, target)
+    await unban(bot, message.from_user.id, target["id"])
+    await show_user_card(bot, message.chat.id, state, await users_repo.get_user(target["id"]),
+                         notice="✅ <i>Бан снят</i>")
 
 
-@router.callback_query(F.data.startswith("adm:card:"))
-async def show_card(call: CallbackQuery, state: FSMContext) -> None:
-    target_id = int((call.data or "0").split(":")[-1])
-    target = await users_repo.get_user(target_id)
-    await call.answer()
+@router.message(AdminPanel.user_card, F.text == rkb.A_REQ_VERIFY)
+async def card_request_verify(message: Message, state: FSMContext, bot: Bot) -> None:
+    await screen.drop(message)
+    target = await _card_user(state)
     if target is None:
-        await call.message.answer("Пользователь не найден.")
         return
-    await send_user_card(call.message, target)
+    code = await verification_handlers.request_verification(
+        bot, target["id"], forced=True, admin_id=message.from_user.id)
+    notice = ("🛡 <i>Это владелец бота — проверки на него не действуют</i>" if code is None
+              else f"✅ <i>Верификация запрошена, код на фото: <code>{code}</code>. "
+                   "До проверки бот для него закрыт.</i>")
+    if code is not None:
+        await admin_log(bot, f"✅ Запрошена верификация: <code>{target['id']}</code> "
+                             f"(админ <code>{message.from_user.id}</code>)")
+    await show_user_card(bot, message.chat.id, state, await users_repo.get_user(target["id"]),
+                         notice=notice)
 
 
-# ──────────────────── Сообщение от имени бота ───────────────────────────────
+@router.message(AdminPanel.user_card, F.text == rkb.A_DROP_VERIFY)
+async def card_drop_verify(message: Message, state: FSMContext, bot: Bot) -> None:
+    await screen.drop(message)
+    target = await _card_user(state)
+    if target is None:
+        return
+    await users_repo.update_user(target["id"], verify_forced=0, verify_status="none",
+                                 verify_code=None)
+    await safe_send(bot, target["id"],
+                    "✅ Требование верификации снято. Можно пользоваться ботом.")
+    await show_user_card(bot, message.chat.id, state, await users_repo.get_user(target["id"]),
+                         notice="🔓 <i>Требование снято</i>")
 
-@router.callback_query(F.data.startswith("adm:msg:"))
-async def ask_message(call: CallbackQuery, state: FSMContext) -> None:
-    target_id = int((call.data or "0").split(":")[-1])
+
+@router.message(AdminPanel.user_card, F.text == rkb.A_UNVERIFY)
+async def card_unverify(message: Message, state: FSMContext, bot: Bot) -> None:
+    await screen.drop(message)
+    target = await _card_user(state)
+    if target is None:
+        return
+    await users_repo.update_user(target["id"], verify_status="none", verified_at=None)
+    await admin_log(bot, f"❎ Снята верификация: <code>{target['id']}</code>")
+    await show_user_card(bot, message.chat.id, state, await users_repo.get_user(target["id"]),
+                         notice="❎ <i>Галочка снята</i>")
+
+
+@router.message(AdminPanel.user_card, F.text == rkb.A_MESSAGE)
+async def card_message(message: Message, state: FSMContext) -> None:
+    await screen.drop(message)
+    target = await _card_user(state)
+    if target is None:
+        return
     await state.set_state(AdminPanel.message_user)
-    await state.update_data(msg_target=target_id)
-    await call.answer()
-    await call.message.answer(
-        f"Напишите текст для пользователя <code>{target_id}</code>.\n"
-        "Он придёт от имени бота, с пометкой «Сообщение от администрации»."
-    )
+    await screen.send(message.bot, message.chat.id, state,
+                      f"Напишите текст для пользователя <code>{target['id']}</code>.\n"
+                      "Он придёт от имени бота, с пометкой «Сообщение от администрации».",
+                      rkb.CANCEL_ONLY)
 
 
 @router.message(AdminPanel.message_user, F.text)
 async def send_message_to_user(message: Message, state: FSMContext, bot: Bot) -> None:
-    data = await state.get_data()
-    target_id = int(data.get("msg_target") or 0)
-    await state.set_state(AdminPanel.menu)
-    if not target_id:
-        await message.answer("Не понял, кому писать. Откройте карточку заново.")
+    await screen.drop(message)
+    target = await _card_user(state)
+    if target is None:
+        await open_panel(bot, message.chat.id, state, True)
+        return
+    if message.text == rkb.CANCEL:
+        await show_user_card(bot, message.chat.id, state, target)
         return
     ok = await safe_send(
-        bot, target_id,
+        bot, target["id"],
         f"📨 <b>Сообщение от администрации</b>\n\n{profile_service.esc(message.text)}",
     )
-    await message.answer("✅ Отправлено" if ok
-                         else "❌ Не доставлено — пользователь заблокировал бота.")
+    await show_user_card(bot, message.chat.id, state, target,
+                         notice="✅ <i>Отправлено</i>" if ok
+                         else "❌ <i>Не доставлено — пользователь заблокировал бота</i>")
+
+
+async def unban(bot: Bot, admin_id: int, target_id: int) -> None:
+    await mod_repo.unban_user(target_id, admin_id)
+    await safe_send(
+        bot, target_id,
+        "✅ <b>Блокировка снята</b>\n\nВы снова можете пользоваться ботом. "
+        "Пожалуйста, соблюдайте правила.",
+    )
+    await admin_log(bot, f"✅ <b>Разбан</b>: <code>{target_id}</code> "
+                         f"(админ <code>{admin_id}</code>)")
+
+
+# ───────────────────────────── Статистика ───────────────────────────────────
+
+@router.message(Command("stats"))
+@router.message(F.text.in_({rkb.A_STATS, rkb.A_SUMMARY}))
+async def show_stats(message: Message, state: FSMContext, is_admin: bool) -> None:
+    await screen.drop(message)
+    data = await stats_repo.collect()
+    await screen.send(message.bot, message.chat.id, state,
+                      stats_repo.render(data) if is_admin else stats_repo.render_short(data),
+                      rkb.ADMIN_BACK)
+
+
+# ───────────────────────── Поиск пользователя ───────────────────────────────
+
+async def _ask_user(message: Message, state: FSMContext, error: str | None = None) -> None:
+    await state.set_state(AdminPanel.find_user)
+    text = "🔎 Пришлите ID или @username пользователя:"
+    await screen.send(message.bot, message.chat.id, state,
+                      f"⚠️ {error}\n\n{text}" if error else text, rkb.ADMIN_BACK)
+
+
+@router.message(AdminPanel.find_user, F.text)
+async def find_user(message: Message, state: FSMContext) -> None:
+    await screen.drop(message)
+    target = await users_repo.find_user(message.text or "")
+    if target is None:
+        await _ask_user(message, state, "Пользователь не найден. Попробуйте другой ID "
+                                        "или @username.")
+        return
+    await show_user_card(message.bot, message.chat.id, state, target)
+
+
+@router.message(Command("find"))
+async def find_command(message: Message, state: FSMContext) -> None:
+    await screen.drop(message)
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await _ask_user(message, state)
+        return
+    target = await users_repo.find_user(parts[1])
+    if target is None:
+        await _ask_user(message, state, "Пользователь не найден.")
+        return
+    await show_user_card(message.bot, message.chat.id, state, target)
+
+
+@router.message(F.text == rkb.A_FIND)
+async def ask_user(message: Message, state: FSMContext) -> None:
+    await screen.drop(message)
+    await _ask_user(message, state)
 
 
 @router.message(Command("say"))
@@ -224,52 +297,62 @@ async def say_command(message: Message, bot: Bot) -> None:
 
 # ─────────────────────────── Настройки бота ─────────────────────────────────
 
-async def _settings_view(settings: Settings) -> tuple[str, Any]:
+async def show_config(bot: Bot, chat_id: int, state: FSMContext, settings: Settings,
+                      notice: str | None = None) -> None:
     likes = await mod_repo.get_int_setting("likes_limit", settings.likes_limit_per_day)
     reg_open = await mod_repo.get_setting("registration_open", "1") == "1"
     text = (
         "⚙️ <b>Настройки бота</b>\n\n"
         f"❤️ Лимит лайков в сутки: <b>{likes}</b>\n"
         f"📝 Регистрация новых анкет: <b>{'открыта' if reg_open else 'закрыта'}</b>\n\n"
-        "<i>Значения применяются сразу и переживают перезапуск.</i>"
+        "<i>Значения применяются сразу и переживают перезапуск. Нажмите на "
+        "настройку, чтобы изменить её.</i>"
     )
-    return text, kb.bot_settings(likes, reg_open)
+    await state.set_state(AdminPanel.bot_settings)
+    await screen.send(bot, chat_id, state, f"{notice}\n\n{text}" if notice else text,
+                      rkb.bot_settings(likes, reg_open))
 
 
-@admin_router.callback_query(F.data == "adm:cfg")
-async def show_config(call: CallbackQuery, settings: Settings) -> None:
-    await call.answer()
-    text, markup = await _settings_view(settings)
-    await call.message.edit_text(text, reply_markup=markup)
+@admin_router.message(F.text == rkb.A_CONFIG)
+async def open_config(message: Message, state: FSMContext, settings: Settings) -> None:
+    await screen.drop(message)
+    await show_config(message.bot, message.chat.id, state, settings)
 
 
-@admin_router.callback_query(F.data == "adm:set:registration")
-async def toggle_registration(call: CallbackQuery, settings: Settings) -> None:
+@admin_router.message(AdminPanel.bot_settings, F.text.in_({rkb.A_REG_OPEN, rkb.A_REG_CLOSED}))
+async def toggle_registration(message: Message, state: FSMContext,
+                              settings: Settings) -> None:
+    await screen.drop(message)
     current = await mod_repo.get_setting("registration_open", "1") == "1"
     await mod_repo.set_setting("registration_open", "0" if current else "1")
-    await call.answer("Готово")
-    text, markup = await _settings_view(settings)
-    await call.message.edit_text(text, reply_markup=markup)
+    await show_config(message.bot, message.chat.id, state, settings,
+                      notice="🔴 <i>Приём анкет закрыт</i>" if current
+                      else "🟢 <i>Приём анкет открыт</i>")
 
 
-@admin_router.callback_query(F.data == "adm:set:likes_limit")
-async def ask_likes_limit(call: CallbackQuery, state: FSMContext) -> None:
+@admin_router.message(AdminPanel.bot_settings, F.text.startswith(rkb.A_LIKES_LIMIT))
+async def ask_likes_limit(message: Message, state: FSMContext) -> None:
+    await screen.drop(message)
     await state.set_state(AdminPanel.setting_value)
     await state.update_data(setting_key="likes_limit")
-    await call.answer()
-    await call.message.answer("Введите новый суточный лимит лайков (число от 1 до 1000):")
+    await screen.send(message.bot, message.chat.id, state,
+                      "Введите новый суточный лимит лайков (число от 1 до 1000):",
+                      rkb.BACK_ONLY)
 
 
 @admin_router.message(AdminPanel.setting_value, F.text)
 async def save_setting(message: Message, state: FSMContext, settings: Settings) -> None:
-    data = await state.get_data()
-    key = data.get("setting_key")
+    await screen.drop(message)
+    bot, chat_id = message.bot, message.chat.id
     raw = (message.text or "").strip()
-    if not raw.isdigit() or not (1 <= int(raw) <= 1000):
-        await message.answer("Нужно число от 1 до 1000.")
+    if raw == rkb.BACK:
+        await show_config(bot, chat_id, state, settings)
         return
+    if not raw.isdigit() or not (1 <= int(raw) <= 1000):
+        await screen.send(bot, chat_id, state,
+                          "⚠️ Нужно число от 1 до 1000.\n\nВведите новый суточный лимит "
+                          "лайков:", rkb.BACK_ONLY)
+        return
+    key = (await state.get_data()).get("setting_key") or "likes_limit"
     await mod_repo.set_setting(key, raw)
-    await state.set_state(AdminPanel.menu)
-    text, markup = await _settings_view(settings)
-    await message.answer("✅ Сохранено")
-    await message.answer(text, reply_markup=markup)
+    await show_config(bot, chat_id, state, settings, notice="✅ <i>Сохранено</i>")

@@ -1,4 +1,8 @@
-"""Порядок подключения роутеров важен: fallback всегда последний."""
+"""Порядок подключения роутеров важен.
+
+nav первым: /start и «🏠 Меню» работают из любого состояния. Дальше —
+разделы с вводом текста (у них хендлеры по состоянию), fallback последним.
+"""
 from __future__ import annotations
 
 from aiogram import Dispatcher
@@ -6,10 +10,11 @@ from aiogram import Dispatcher
 
 def setup(dp: Dispatcher) -> None:
     from app.handlers import (
-        admin, browse, fallback, menu, onboarding, profile, registration,
+        admin, browse, fallback, menu, nav, onboarding, profile, registration,
         reports, settings, verification,
     )
 
+    dp.include_router(nav.router)
     dp.include_router(admin.router)
     dp.include_router(onboarding.router)
     dp.include_router(verification.router)

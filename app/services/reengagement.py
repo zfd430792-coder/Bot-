@@ -7,7 +7,10 @@
 * после `REMINDER_MAX_COUNT` напоминаний подряд без ответа — замолкаем
   совсем (вернулся человек — счётчик обнуляется сам);
 * ночью не беспокоим: местный час считаем по долготе из анкеты;
-* в каждом сообщении есть кнопка «Не напоминать».
+* в каждом сообщении есть кнопка «Больше не напоминать».
+
+Кнопки напоминания нижние: человек давно не заходил, так что незачем
+беречь клавиатуру экрана, на котором он был.
 
 Текст подбирается по ситуации: есть непросмотренные лайки — зовём смотреть их,
 появились новые анкеты — говорим сколько, иначе шлём короткое напоминание.
@@ -25,7 +28,7 @@ from aiogram import Bot
 from app.config import Settings
 from app.db import moderation as mod_repo
 from app.db.database import db
-from app.keyboards import inline as kb
+from app.keyboards import reply as rkb
 from app.services.notify import safe_send
 
 log = logging.getLogger(__name__)
@@ -134,8 +137,7 @@ async def send_batch(bot: Bot, settings: Settings) -> int:
         if is_quiet(local_hour(row["lon"]), settings):
             continue          # у человека ночь — вернёмся к нему днём
 
-        ok = await safe_send(bot, int(row["id"]), compose(row),
-                             kb.reminder_actions())
+        ok = await safe_send(bot, int(row["id"]), compose(row), rkb.REMINDER)
         if ok:
             sent += 1
             await db.execute(

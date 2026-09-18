@@ -4,9 +4,9 @@
 Поэтому перезапуск бота или потеря FSM не заставляют начинать сначала —
 команда /start продолжает с первого незаполненного поля.
 
-Диалог живёт одним экраном: вопрос меняется в том же сообщении, ответ
-пользователя удаляется. В чате всегда видно ровно текущий шаг, а сверху
-короткой строкой — то, что уже заполнено.
+Диалог живёт одним экраном: каждый вопрос приходит со своими нижними
+кнопками вместо прежнего, ответ пользователя удаляется. В чате всегда видно
+ровно текущий шаг, а сверху короткой строкой — то, что уже заполнено.
 
 Отдельного вопроса «где искать» нет: лента сама идёт от ближних к дальним,
 как в Дайвинчике. С чего начинать — город, область или радиус — можно
@@ -19,14 +19,13 @@ from typing import Any, Mapping
 
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import Message
 
 from app import texts
 from app.config import Settings, get_settings
 from app.db import users as users_repo
 from app.db.database import norm_text
 from app.handlers import menu as menu_handlers
-from app.keyboards import inline as kb
 from app.keyboards import reply as rkb
 from app.services import geo, profile, screen
 from app.services.notify import admin_log
@@ -42,6 +41,8 @@ LINK_RE = re.compile(r"(https?://|www\.|t\.me/|@[a-zA-Z0-9_]{4,}|telegram\.me)",
 NAME_EXTRA_CHARS = " -'’."
 
 GENDER_TITLE = {"m": "парень", "f": "девушка"}
+GENDER_BY_BUTTON = {rkb.GENDER_M: "m", rkb.GENDER_F: "f"}
+LOOKING_BY_BUTTON = {rkb.LOOK_M: "m", rkb.LOOK_F: "f", rkb.LOOK_ANY: "any"}
 
 
 def progress(user: Mapping[str, Any] | None) -> str:
@@ -73,7 +74,7 @@ async def _step(bot: Bot, chat_id: int, state: FSMContext, text: str,
     """Показывает шаг единственным сообщением вместо предыдущего."""
     user = await users_repo.get_user(chat_id)
     body = (f"⚠️ {error}\n\n" if error else "") + progress(user) + text
-    await screen.show(bot, chat_id, state, body, markup)
+    await screen.send(bot, chat_id, state, body, markup)
 
 
 # ──────────────────────────── Экраны шагов ──────────────────────────────────
@@ -81,52 +82,51 @@ async def _step(bot: Bot, chat_id: int, state: FSMContext, text: str,
 async def ask_gender(bot: Bot, chat_id: int, state: FSMContext,
                      error: str | None = None) -> None:
     await state.set_state(Registration.gender)
-    await _step(bot, chat_id, state, texts.REG_GENDER, kb.GENDER, error)
+    await _step(bot, chat_id, state, texts.REG_GENDER, rkb.GENDER, error)
 
 
 async def ask_looking(bot: Bot, chat_id: int, state: FSMContext,
                       error: str | None = None) -> None:
     await state.set_state(Registration.looking_for)
-    await _step(bot, chat_id, state, texts.REG_LOOKING, kb.LOOKING_FOR, error)
+    await _step(bot, chat_id, state, texts.REG_LOOKING, rkb.LOOKING, error)
 
 
 async def ask_age(bot: Bot, chat_id: int, state: FSMContext,
                   error: str | None = None) -> None:
     await state.set_state(Registration.age)
-    await _step(bot, chat_id, state, texts.REG_AGE, None, error)
+    await _step(bot, chat_id, state, texts.REG_AGE, rkb.REMOVE, error)
 
 
 async def ask_name(bot: Bot, chat_id: int, state: FSMContext,
                    settings: Settings, tg_name: str = "",
                    error: str | None = None) -> None:
     await state.set_state(Registration.name)
-    # Предлагаем имя из Telegram, только если им реально можно пользоваться:
-    # кнопка, которая всегда отвечает «не подходит», хуже её отсутствия
+    # Имя из Telegram — одной кнопкой, но только если им реально можно
+    # пользоваться: кнопка, которая всегда отвечает «не подходит», хуже её отсутствия
     suggestion = validate_name(tg_name, settings)
-    markup = kb.use_tg_name(suggestion) if suggestion else None
-    await _step(bot, chat_id, state, texts.REG_NAME, markup, error)
+    await _step(bot, chat_id, state, texts.REG_NAME,
+                rkb.name_suggestion(suggestion), error)
 
 
 async def ask_media(bot: Bot, chat_id: int, state: FSMContext,
                     settings: Settings, error: str | None = None) -> None:
     await state.set_state(Registration.media)
     await _step(bot, chat_id, state,
-                texts.REG_MEDIA.format(sec=settings.max_video_seconds), None, error)
+                texts.REG_MEDIA.format(sec=settings.max_video_seconds), rkb.REMOVE, error)
 
 
 async def ask_about(bot: Bot, chat_id: int, state: FSMContext,
                     settings: Settings, error: str | None = None) -> None:
     await state.set_state(Registration.about)
     await _step(bot, chat_id, state,
-                texts.REG_ABOUT.format(max_len=settings.about_max_len),
-                kb.SKIP_ABOUT, error)
+                texts.REG_ABOUT.format(max_len=settings.about_max_len), rkb.ABOUT, error)
 
 
 async def ask_city(bot: Bot, chat_id: int, state: FSMContext,
                    error: str | None = None) -> None:
     await state.set_state(Registration.city)
-    await _step(bot, chat_id, state, texts.REG_CITY,
-                rkb.request_location(), error)
+    await state.update_data(city_options=None)
+    await _step(bot, chat_id, state, texts.REG_CITY, rkb.request_location(), error)
 
 
 async def ask_region(bot: Bot, chat_id: int, state: FSMContext,
@@ -165,10 +165,9 @@ async def show_preview(bot: Bot, chat_id: int, state: FSMContext) -> None:
             place += f", {fresh['region']}"
         header = texts.REG_GEO_SAVED.format(city=profile.esc(place)) + "\n" + header
 
-    await screen.prepare(bot, chat_id, state)
-    card = await profile.send_card(bot, chat_id, fresh, markup=kb.CONFIRM_PROFILE,
+    card = await profile.send_card(bot, chat_id, fresh, markup=rkb.CONFIRM_PROFILE,
                                    show_distance=False, header=header)
-    await screen.remember(state, card)
+    await screen.replace(bot, chat_id, state, card)
 
 
 # ────────────────────────────── Точки входа ─────────────────────────────────
@@ -198,30 +197,30 @@ async def resume(bot: Bot, chat_id: int, state: FSMContext, user: Mapping[str, A
         await show_preview(bot, chat_id, state)
 
 
-# ──────────────────────────── Шаг 1: пол ────────────────────────────────────
+# ──────────────────────────── Шаги 1–2: кнопки ──────────────────────────────
 
-@router.callback_query(F.data.startswith("reg:gender:"), Registration.gender)
-async def set_gender(call: CallbackQuery, state: FSMContext, user) -> None:
-    gender = (call.data or "").split(":")[-1]
-    if gender not in {"m", "f"}:
-        await call.answer()
+@router.message(Registration.gender)
+async def set_gender(message: Message, state: FSMContext, user) -> None:
+    await screen.drop(message)
+    gender = GENDER_BY_BUTTON.get(message.text or "")
+    if gender is None:
+        await ask_gender(message.bot, message.chat.id, state,
+                         "Выберите вариант кнопкой внизу.")
         return
     await users_repo.update_user(user["id"], gender=gender)
-    await call.answer()
-    await ask_looking(call.bot, call.message.chat.id, state)
+    await ask_looking(message.bot, message.chat.id, state)
 
 
-# ─────────────────────── Шаг 2: кого ищем ───────────────────────────────────
-
-@router.callback_query(F.data.startswith("reg:look:"), Registration.looking_for)
-async def set_looking(call: CallbackQuery, state: FSMContext, user) -> None:
-    value = (call.data or "").split(":")[-1]
-    if value not in {"m", "f", "any"}:
-        await call.answer()
+@router.message(Registration.looking_for)
+async def set_looking(message: Message, state: FSMContext, user) -> None:
+    await screen.drop(message)
+    value = LOOKING_BY_BUTTON.get(message.text or "")
+    if value is None:
+        await ask_looking(message.bot, message.chat.id, state,
+                          "Выберите вариант кнопкой внизу.")
         return
     await users_repo.update_user(user["id"], looking_for=value)
-    await call.answer()
-    await ask_age(call.bot, call.message.chat.id, state)
+    await ask_age(message.bot, message.chat.id, state)
 
 
 # ───────────────────────── Шаг 3: возраст ───────────────────────────────────
@@ -278,24 +277,9 @@ def validate_name(raw: str, settings: Settings) -> str | None:
     return name
 
 
-@router.callback_query(F.data == "reg:tgname", Registration.name)
-async def use_tg_name(call: CallbackQuery, state: FSMContext, user,
-                      settings: Settings) -> None:
-    name = validate_name(call.from_user.first_name or "", settings)
-    if not name:
-        # Сюда попасть почти невозможно: кнопку показываем только с пригодным
-        # именем. Оставлено на случай, если имя поменяли между шагами.
-        await call.answer("Это имя не подходит — напишите его вручную",
-                          show_alert=True)
-        await ask_name(call.bot, call.message.chat.id, state, settings)
-        return
-    await users_repo.update_user(user["id"], name=name)
-    await call.answer()
-    await ask_media(call.bot, call.message.chat.id, state, settings)
-
-
 @router.message(Registration.name, F.text)
 async def set_name(message: Message, state: FSMContext, user, settings: Settings) -> None:
+    """И набранное имя, и нажатая кнопка с именем из Telegram приходят сюда текстом."""
     await screen.drop(message)
     name = validate_name(message.text or "", settings)
     if not name:
@@ -333,13 +317,6 @@ async def set_media(message: Message, state: FSMContext, user,
 
 # ───────────────────────── Шаг 6: о себе ────────────────────────────────────
 
-@router.callback_query(F.data == "reg:skip_about", Registration.about)
-async def skip_about(call: CallbackQuery, state: FSMContext, user) -> None:
-    await users_repo.update_user(user["id"], about="")
-    await call.answer()
-    await ask_city(call.bot, call.message.chat.id, state)
-
-
 @router.message(Registration.about, F.text)
 async def set_about(message: Message, state: FSMContext, user,
                     settings: Settings) -> None:
@@ -347,6 +324,10 @@ async def set_about(message: Message, state: FSMContext, user,
     about = (message.text or "").strip()
     bot, chat_id = message.bot, message.chat.id
 
+    if about == rkb.SKIP:
+        await users_repo.update_user(user["id"], about="")
+        await ask_city(bot, chat_id, state)
+        return
     if len(about) > settings.about_max_len:
         await ask_about(bot, chat_id, state, settings,
                         texts.REG_ABOUT_LONG.format(max_len=settings.about_max_len))
@@ -397,8 +378,18 @@ async def set_city(message: Message, state: FSMContext, user,
     await screen.drop(message)
     bot, chat_id = message.bot, message.chat.id
 
-    if query == rkb.BTN_MANUAL_CITY:
+    if query in (rkb.OTHER_CITY, rkb.MANUAL_CITY):
         await ask_city(bot, chat_id, state)
+        return
+
+    # Нажата кнопка одного из найденных вариантов
+    options = (await state.get_data()).get("city_options") or []
+    chosen = next((o for o in options if o["title"] == query), None)
+    if chosen is not None:
+        city = geo.City(chosen["name"], chosen["region"], chosen["country"],
+                        chosen["lat"], chosen["lon"])
+        await save_city(user["id"], city, lat=city.lat, lon=city.lon, source="city")
+        await geo_done(bot, chat_id, state)
         return
 
     found = await geo.resolve(query, settings.geocoder_enabled, settings.geocoder_email)
@@ -411,11 +402,11 @@ async def set_city(message: Message, state: FSMContext, user,
 
     if len(found) > 1:
         await state.update_data(city_options=[
-            {"name": c.name, "region": c.region, "country": c.country,
-             "lat": c.lat, "lon": c.lon} for c in found
+            {"title": c.title, "name": c.name, "region": c.region,
+             "country": c.country, "lat": c.lat, "lon": c.lon} for c in found
         ])
         await _step(bot, chat_id, state, texts.REG_CITY_CHOICE,
-                    kb.city_choices(found))
+                    rkb.city_choices([c.title for c in found]))
         return
 
     # Назвали не город, а область целиком — так и запоминаем: такой человек
@@ -472,54 +463,16 @@ async def set_region_fallback(message: Message, state: FSMContext, user) -> None
     await geo_done(bot, chat_id, state)
 
 
-@router.callback_query(F.data.startswith("reg:city:"), Registration.city)
-async def pick_city(call: CallbackQuery, state: FSMContext, user) -> None:
-    suffix = (call.data or "").split(":")[-1]
-    await call.answer()
-
-    if suffix == "retry":
-        await ask_city(call.bot, call.message.chat.id, state)
-        return
-
-    data = await state.get_data()
-    options = data.get("city_options") or []
-    try:
-        chosen = options[int(suffix)]
-    except (ValueError, IndexError):
-        return
-
-    city = geo.City(chosen["name"], chosen["region"], chosen["country"],
-                    chosen["lat"], chosen["lon"])
-    await save_city(user["id"], city, lat=city.lat, lon=city.lon, source="city")
-    await geo_done(call.bot, call.message.chat.id, state)
-
-
-@router.callback_query(F.data.startswith("reg:scope:"), Registration.scope)
-async def set_scope(call: CallbackQuery, state: FSMContext, user,
-                    settings: Settings) -> None:
-    """Кнопки прежнего шага «где искать» — у кого он остался открытым."""
-    scope = (call.data or "").split(":")[-1]
-    if scope not in {"city", "region", "near"}:
-        await call.answer()
-        return
-    await users_repo.update_user(
-        user["id"], search_scope=scope,
-        search_radius=user["search_radius"] or settings.default_radius_km,
-    )
-    await call.answer()
-    await show_preview(call.bot, call.message.chat.id, state)
-
-
 # ───────────────────────── Подтверждение ────────────────────────────────────
 
-@router.callback_query(F.data == "reg:confirm", Registration.confirm)
-async def confirm(call: CallbackQuery, state: FSMContext, bot: Bot, user,
+@router.message(Registration.confirm, F.text == rkb.CONFIRM)
+async def confirm(message: Message, state: FSMContext, bot: Bot, user,
                   settings: Settings, is_admin: bool) -> None:
+    await screen.drop(message)
     await users_repo.update_user(user["id"], registered=1, is_active=1)
-    await call.answer("Готово!")
     fresh = await users_repo.get_user(user["id"])
     await menu_handlers.show_menu(
-        bot, call.message.chat.id, state, fresh, is_admin,
+        bot, message.chat.id, state, fresh, is_admin,
         note="🎉 <b>Анкета опубликована!</b> Начинайте смотреть анкеты 👇",
     )
     await admin_log(
@@ -531,27 +484,13 @@ async def confirm(call: CallbackQuery, state: FSMContext, bot: Bot, user,
     )
 
 
-@router.callback_query(F.data == "reg:restart", Registration.confirm)
-async def restart(call: CallbackQuery, state: FSMContext) -> None:
-    await call.answer()
-    await ask_gender(call.bot, call.message.chat.id, state)
+@router.message(Registration.confirm, F.text == rkb.REFILL)
+async def restart(message: Message, state: FSMContext) -> None:
+    await screen.drop(message)
+    await ask_gender(message.bot, message.chat.id, state)
 
 
 # ────────────── Подсказки, если на шаге прислали не то ──────────────────────
-
-@router.message(Registration.gender)
-async def gender_hint(message: Message, state: FSMContext) -> None:
-    await screen.drop(message)
-    await ask_gender(message.bot, message.chat.id, state,
-                     "Выберите вариант кнопкой ниже.")
-
-
-@router.message(Registration.looking_for)
-async def looking_hint(message: Message, state: FSMContext) -> None:
-    await screen.drop(message)
-    await ask_looking(message.bot, message.chat.id, state,
-                      "Выберите вариант кнопкой ниже.")
-
 
 @router.message(Registration.about)
 async def about_hint(message: Message, state: FSMContext, settings: Settings) -> None:
@@ -572,3 +511,16 @@ async def region_hint(message: Message, state: FSMContext) -> None:
     await screen.drop(message)
     await ask_region(message.bot, message.chat.id, state,
                      "Напишите название области текстом или отправьте геопозицию.")
+
+
+@router.message(Registration.confirm)
+async def confirm_hint(message: Message, state: FSMContext) -> None:
+    """Предпросмотр ждёт одну из двух кнопок — остальное просто убираем."""
+    await screen.drop(message)
+
+
+@router.message(Registration.scope)
+async def old_scope_step(message: Message, state: FSMContext) -> None:
+    """Шаг «где искать» из прежней версии: его больше нет — сразу к предпросмотру."""
+    await screen.drop(message)
+    await show_preview(message.bot, message.chat.id, state)
