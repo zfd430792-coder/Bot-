@@ -1,4 +1,12 @@
-"""Лента анкет: просмотр, лайки, лимиты и взаимные симпатии."""
+"""Лента анкет: просмотр, лайки, лимиты и взаимные симпатии.
+
+Карточка анкеты — это экран: следующая заменяет предыдущую, а вопросы по
+ходу (сообщение к лайку, жалоба) появляются под ней и уходят вместе с ней.
+
+Лента идёт от ближних к дальним, как в Дайвинчике (см. search_candidates):
+когда в городе анкеты кончаются, строчка над карточкой говорит, что дальше
+пойдут люди из области, а потом — из соседних городов.
+"""
 from __future__ import annotations
 
 import logging
@@ -20,7 +28,7 @@ from app.handlers.registration import LINK_RE
 from app.keyboards import inline as kb
 from app.keyboards import reply as rkb
 from app.services import ads as ads_service
-from app.services import antifraud, profile
+from app.services import antifraud, profile, screen
 from app.services.notify import safe_send
 from app.states import Browsing
 
@@ -53,24 +61,46 @@ def _with_distance(row: Mapping[str, Any], viewer: Mapping[str, Any]) -> dict:
     return data
 
 
-async def show_next(bot: Bot, chat_id: int, state: FSMContext,
-                    user: Mapping[str, Any], settings: Settings) -> None:
-    """Показывает следующую анкету, убрав предыдущую карточку."""
-    data = await state.get_data()
-    await profile.delete_messages(bot, chat_id, data.get("card_msgs") or [])
-    await state.update_data(card_msgs=[])
+def _step_notice(viewer: Mapping[str, Any], tier: int) -> str:
+    """Строчка о том, что лента перешла к следующей ступени."""
+    if viewer["search_scope"] == "near":
+        return texts.FEED_OUT_OF_RADIUS.format(radius=viewer["search_radius"] or 50)
+    if tier == users_repo.AREA_REGION and viewer["region"]:
+        return texts.FEED_TO_REGION.format(region=profile.esc(viewer["region"]))
+    return texts.FEED_TO_FAR
 
+
+def _queue(raw: list) -> list[tuple[int, int]]:
+    """Очередь хранит пары (id, ступень); старый формат — просто id."""
+    return [(item, 0) if isinstance(item, int) else (int(item[0]), int(item[1]))
+            for item in raw or []]
+
+
+async def show_next(bot: Bot, chat_id: int, state: FSMContext,
+                    user: Mapping[str, Any], settings: Settings, *,
+                    notice: str | None = None) -> None:
+    """Показывает следующую анкету вместо предыдущей.
+
+    notice — строка над карточкой: «сообщение отправлено», «жалоба принята».
+    """
+    data = await state.get_data()
     mode = data.get("feed_mode", "search")
-    queue: list[int] = list(data.get("feed") or [])
+    queue = _queue(data.get("feed"))
 
     if not queue:
-        rows = (await users_repo.incoming_likes(user["id"]) if mode == "likes"
-                else await users_repo.search_candidates(user))
-        queue = [int(r["id"]) for r in rows]
+        if mode == "likes":
+            rows = await users_repo.incoming_likes(user["id"])
+            queue = [(int(r["id"]), 0) for r in rows]
+        else:
+            rows = await users_repo.search_candidates(user)
+            # Кто лайкнул нас — вне ступеней: он первый, где бы ни жил
+            queue = [(int(r["id"]), 0 if r["liked_me"] else int(r["area_tier"]))
+                     for r in rows]
 
     fresh_viewer = await users_repo.get_user(user["id"])
+    tier_seen = int(data.get("tier_seen") or users_repo.AREA_LOCAL)
     while queue:
-        target_id = queue.pop(0)
+        target_id, tier = queue.pop(0)
         target = await users_repo.get_user(target_id)
         if target is None or target["is_banned"] or not target["is_active"] \
                 or not target["registered"] or target["verify_forced"]:
@@ -78,7 +108,15 @@ async def show_next(bot: Bot, chat_id: int, state: FSMContext,
         if await reactions_repo.has_reacted(user["id"], target_id):
             continue
 
+        header = [notice] if notice else []
+        if mode == "likes" and data.get("likes_intro"):
+            header.append(texts.LIKES_INTRO.format(count=data["likes_intro"]))
+        if mode == "search" and tier > tier_seen:
+            header.append(_step_notice(fresh_viewer, tier))
+            tier_seen = tier
+
         # Реклама идёт перед анкетой и убирается вместе с ней
+        await screen.prepare(bot, chat_id, state)
         ads_seen = int(data.get("ads_seen", 0)) + 1
         ad_messages, ads_seen = await ads_service.maybe_send(bot, chat_id, ads_seen)
 
@@ -91,82 +129,120 @@ async def show_next(bot: Bot, chat_id: int, state: FSMContext,
                 if mode == "likes" else None)
         message_ids = await profile.send_card(
             bot, chat_id, card, markup=kb.browse(target_id, left),
-            viewer=fresh_viewer, note=note,
+            viewer=fresh_viewer, note=note, header="\n".join(header),
         )
+        await screen.remember(state, ad_messages + message_ids)
         await state.set_state(Browsing.feed if mode == "search" else Browsing.likes_inbox)
-        await state.update_data(feed=queue, card_msgs=ad_messages + message_ids,
-                                current=target_id, feed_mode=mode, ads_seen=ads_seen)
+        await state.update_data(feed=[list(item) for item in queue], current=target_id,
+                                feed_mode=mode, ads_seen=ads_seen, tier_seen=tier_seen,
+                                likes_intro=None)
         return
 
-    # Анкеты кончились — возвращаем человека в меню одним сообщением
-    await state.update_data(feed=[], card_msgs=[], current=None)
+    # Анкеты кончились совсем — экран с тем, что можно сделать дальше
+    await state.update_data(feed=[], current=None)
     await state.set_state(None)
-    text = texts.NO_INCOMING_LIKES if mode == "likes" else texts.NO_PROFILES
-    await menu_handlers.send_main_menu(
-        bot, chat_id, fresh_viewer, settings.is_admin(user["id"]), text=text
-    )
+    lead = f"{notice}\n\n" if notice else ""
+    if mode == "likes":
+        await screen.show(bot, chat_id, state, lead + texts.LIKES_DONE, kb.LIKES_END)
+        return
+
+    skipped = await reactions_repo.count_dislikes(user["id"])
+    hints = []
+    if skipped:
+        hints.append(texts.NO_PROFILES_SKIPPED.format(count=skipped))
+    hints.append(texts.NO_PROFILES_AGE.format(age_min=fresh_viewer["age_min"] or 18,
+                                              age_max=fresh_viewer["age_max"] or 99))
+    await screen.show(bot, chat_id, state,
+                      lead + texts.NO_PROFILES + "\n\n" + "\n".join(hints),
+                      kb.feed_end(skipped))
 
 
 # ─────────────────────────── Входные точки ──────────────────────────────────
 
-async def _require_profile(message: Message, user: Mapping[str, Any]) -> bool:
+async def _can_browse(bot: Bot, chat_id: int, state: FSMContext,
+                      user: Mapping[str, Any]) -> bool:
     if not user["registered"]:
-        await message.answer("Сначала заполните анкету — команда /start")
+        await screen.show(bot, chat_id, state,
+                          "Сначала заполните анкету — это пара минут.", kb.START_OVER)
         return False
     if not user["is_active"]:
-        await message.answer(
+        await screen.show(
+            bot, chat_id, state,
             "🙈 Ваша анкета скрыта из поиска, поэтому смотреть чужие нельзя.\n"
-            "Включите показ в разделе «Моя анкета»."
+            "Включите показ в разделе «Моя анкета».",
+            kb.BACK_HOME,
         )
         return False
     return True
 
 
+async def open_feed(bot: Bot, chat_id: int, state: FSMContext,
+                    user: Mapping[str, Any], settings: Settings, *,
+                    notice: str | None = None) -> None:
+    if not await _can_browse(bot, chat_id, state, user):
+        return
+    await state.update_data(feed=[], feed_mode="search", tier_seen=users_repo.AREA_LOCAL,
+                            current=None)
+    await show_next(bot, chat_id, state, user, settings, notice=notice)
+
+
 @router.message(Command("search"))
 @router.message(F.text == rkb.BTN_SEARCH)
-async def start_feed(message: Message, state: FSMContext, bot: Bot,
-                     user: Mapping[str, Any], settings: Settings) -> None:
-    if not await _require_profile(message, user):
-        return
-    await state.update_data(feed=[], feed_mode="search", card_msgs=[])
-    await show_next(bot, message.chat.id, state, user, settings)
+async def search_command(message: Message, state: FSMContext, bot: Bot,
+                         user: Mapping[str, Any], settings: Settings) -> None:
+    await screen.drop(message)
+    await open_feed(bot, message.chat.id, state, user, settings)
+
+
+@router.callback_query(F.data == "m:search")
+async def search_button(call: CallbackQuery, state: FSMContext, bot: Bot,
+                        user: Mapping[str, Any], settings: Settings) -> None:
+    await call.answer()
+    await open_feed(bot, call.message.chat.id, state, user, settings)
+
+
+async def open_likes(bot: Bot, chat_id: int, state: FSMContext,
+                     user: Mapping[str, Any], settings: Settings, count: int) -> None:
+    await state.update_data(feed=[], feed_mode="likes", likes_intro=count, current=None)
+    await show_next(bot, chat_id, state, user, settings)
 
 
 @router.message(F.text.startswith(rkb.BTN_LIKES))
-async def start_likes_inbox(message: Message, state: FSMContext, bot: Bot,
-                            user: Mapping[str, Any], settings: Settings) -> None:
-    if not await _require_profile(message, user):
+async def likes_command(message: Message, state: FSMContext, bot: Bot,
+                        user: Mapping[str, Any], settings: Settings,
+                        is_admin: bool) -> None:
+    await screen.drop(message)
+    if not await _can_browse(bot, message.chat.id, state, user):
         return
     count = await users_repo.count_incoming_likes(user["id"])
     if not count:
-        await message.answer(texts.NO_INCOMING_LIKES)
+        await menu_handlers.show_menu(bot, message.chat.id, state, user, is_admin,
+                                      note=texts.NO_INCOMING_LIKES)
         return
-    await message.answer(
-        f"❤️ Вас лайкнули: <b>{count}</b>\n"
-        "Показываю их анкеты — ответьте взаимностью, и бот даст контакты."
-    )
-    await state.update_data(feed=[], feed_mode="likes", card_msgs=[])
-    await show_next(bot, message.chat.id, state, user, settings)
+    await open_likes(bot, message.chat.id, state, user, settings, count)
 
 
-@router.message(F.text == rkb.BTN_MATCHES)
-async def show_matches(message: Message, user: Mapping[str, Any]) -> None:
-    rows = await users_repo.get_matches(user["id"])
-    if not rows:
-        await message.answer(
-            "💬 Совпадений пока нет.\n\nСтавьте ❤️ — чем больше анкет посмотрите, "
-            "тем выше шанс взаимности."
-        )
+@router.callback_query(F.data == "m:likes")
+async def likes_button(call: CallbackQuery, state: FSMContext, bot: Bot,
+                       user: Mapping[str, Any], settings: Settings) -> None:
+    count = await users_repo.count_incoming_likes(user["id"])
+    if not count:
+        # Пустой раздел не стоит отдельного экрана — хватит всплывашки
+        await call.answer(texts.NO_INCOMING_LIKES, show_alert=True)
         return
-    lines = ["💬 <b>Ваши совпадения</b>\n"]
-    for row in rows:
-        link = f"@{row['username']}" if row["username"] else "профиль скрыт"
-        verified = " ☑️" if row["verify_status"] == "verified" else ""
-        lines.append(
-            f"{profile.GENDER_EMOJI.get(row['gender'], '•')} "
-            f"<b>{profile.esc(row['name'])}</b>, {row['age']}{verified} — {link}"
-        )
-    await message.answer("\n".join(lines))
+    await call.answer()
+    if await _can_browse(bot, call.message.chat.id, state, user):
+        await open_likes(bot, call.message.chat.id, state, user, settings, count)
+
+
+@router.callback_query(F.data == "br:reset")
+async def reset_skipped(call: CallbackQuery, state: FSMContext, bot: Bot,
+                        user: Mapping[str, Any], settings: Settings) -> None:
+    """Конец ленты: вернуть в выдачу всех, кого пропустили."""
+    removed = await reactions_repo.reset_dislikes(user["id"], older_than_days=0)
+    await call.answer()
+    await open_feed(bot, call.message.chat.id, state, user, settings,
+                    notice=f"🔄 <i>Вернул пропущенные анкеты: {removed}</i>")
 
 
 # ───────────────────────────── Реакции ──────────────────────────────────────
@@ -179,8 +255,7 @@ async def like(call: CallbackQuery, state: FSMContext, bot: Bot,
 
     free = await _like_is_free(user["id"], target_id, settings)
     if not free and not await users_repo.consume_like(user["id"], limit):
-        await call.answer("Лимит лайков на сегодня исчерпан", show_alert=True)
-        await call.message.answer(texts.LIKE_LIMIT_REACHED.format(limit=limit, hours=24))
+        await call.answer(texts.LIKE_LIMIT_ALERT.format(limit=limit), show_alert=True)
         return
 
     matched = await reactions_repo.add_reaction(user["id"], target_id, "like")
@@ -201,71 +276,86 @@ async def like(call: CallbackQuery, state: FSMContext, bot: Bot,
 
 # ───────────────────── Лайк с сообщением ────────────────────────────────────
 
+async def _note_prompt(bot: Bot, chat_id: int, state: FSMContext,
+                       settings: Settings, error: str | None = None) -> None:
+    """Вопрос «что написать» под карточкой. Ошибка — новым вопросом на его месте."""
+    data = await state.get_data()
+    old = data.get("note_prompt")
+    if old:
+        await profile.delete_messages(bot, chat_id, [old])
+        await screen.forget(state, [old])
+    text = texts.LIKE_NOTE_ASK.format(max_len=settings.note_max_len)
+    if error:
+        text = f"⚠️ {error}\n\n{text}"
+    sent = await bot.send_message(chat_id, text, reply_markup=kb.NOTE_CANCEL)
+    await screen.add(state, [sent.message_id])
+    await state.update_data(note_prompt=sent.message_id)
+
+
 @router.callback_query(F.data.startswith("br:note:"))
-async def ask_note(call: CallbackQuery, state: FSMContext, user: Mapping[str, Any],
-                   settings: Settings) -> None:
+async def ask_note(call: CallbackQuery, state: FSMContext, bot: Bot,
+                   user: Mapping[str, Any], settings: Settings) -> None:
     """Сначала убеждаемся, что лайк вообще возможен — иначе текст писался зря."""
     target_id = int((call.data or "0").split(":")[-1])
     limit = await _likes_limit(settings)
     fresh = await users_repo.get_user(user["id"])
     free = await _like_is_free(user["id"], target_id, settings)
     if not free and await users_repo.likes_left(fresh, limit) <= 0:
-        await call.answer("Лимит лайков на сегодня исчерпан", show_alert=True)
-        await call.message.answer(texts.LIKE_LIMIT_REACHED.format(limit=limit, hours=24))
+        await call.answer(texts.LIKE_LIMIT_ALERT.format(limit=limit), show_alert=True)
         return
 
     await state.set_state(Browsing.note)
     await state.update_data(note_target=target_id)
     await call.answer()
-    await call.message.answer(
-        texts.LIKE_NOTE_ASK.format(max_len=settings.note_max_len),
-        reply_markup=kb.NOTE_CANCEL,
-    )
+    await _note_prompt(bot, call.message.chat.id, state, settings)
 
 
 @router.callback_query(F.data == "br:note_cancel", Browsing.note)
-async def cancel_note(call: CallbackQuery, state: FSMContext, bot: Bot,
-                      user: Mapping[str, Any], settings: Settings) -> None:
+async def cancel_note(call: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    """Передумал писать — убираем вопрос, анкета остаётся на экране."""
+    data = await state.get_data()
+    prompt = data.get("note_prompt")
+    if prompt:
+        await profile.delete_messages(bot, call.message.chat.id, [prompt])
+        await screen.forget(state, [prompt])
+    await state.update_data(note_prompt=None, note_target=None)
     await state.set_state(Browsing.feed)
     await call.answer(texts.CANCELLED)
-    try:
-        await call.message.delete()
-    except Exception:
-        pass
-    await show_next(bot, call.message.chat.id, state, user, settings)
 
 
 @router.message(Browsing.note, F.text)
 async def send_note(message: Message, state: FSMContext, bot: Bot,
                     user: Mapping[str, Any], settings: Settings) -> None:
+    await screen.drop(message)
     note = (message.text or "").strip()
+    chat_id = message.chat.id
     if not note:
-        await message.answer(texts.LIKE_NOTE_EMPTY)
+        await _note_prompt(bot, chat_id, state, settings, texts.LIKE_NOTE_EMPTY)
         return
     if len(note) > settings.note_max_len:
-        await message.answer(texts.LIKE_NOTE_LONG.format(max_len=settings.note_max_len))
+        await _note_prompt(bot, chat_id, state, settings,
+                           texts.LIKE_NOTE_LONG.format(max_len=settings.note_max_len))
         return
     if LINK_RE.search(note):
-        await message.answer(texts.LIKE_NOTE_LINKS)
+        await _note_prompt(bot, chat_id, state, settings, texts.LIKE_NOTE_LINKS)
         return
 
     data = await state.get_data()
     target_id = int(data.get("note_target") or 0)
+    await state.update_data(note_prompt=None, note_target=None)
+    await state.set_state(Browsing.feed)
     if not target_id:
-        await state.set_state(Browsing.feed)
-        await show_next(bot, message.chat.id, state, user, settings)
+        await show_next(bot, chat_id, state, user, settings)
         return
 
     limit = await _likes_limit(settings)
     free = await _like_is_free(user["id"], target_id, settings)
     if not free and not await users_repo.consume_like(user["id"], limit):
-        await state.set_state(Browsing.feed)
-        await message.answer(texts.LIKE_LIMIT_REACHED.format(limit=limit, hours=24))
+        await show_next(bot, chat_id, state, user, settings,
+                        notice=texts.LIKE_LIMIT_ALERT.format(limit=limit))
         return
 
     matched = await reactions_repo.add_reaction(user["id"], target_id, "like", note)
-    await message.answer(texts.LIKE_NOTE_SENT)
-    await state.set_state(Browsing.feed)
 
     if await antifraud.check(bot, user["id"], settings):
         await state.clear()
@@ -276,15 +366,15 @@ async def send_note(message: Message, state: FSMContext, bot: Bot,
     else:
         await _notify_like(bot, user["id"], target_id, note)
 
-    await show_next(bot, message.chat.id, state, user, settings)
+    await show_next(bot, chat_id, state, user, settings, notice=texts.LIKE_NOTE_SENT)
 
 
 @router.message(Browsing.note)
-async def note_hint(message: Message, settings: Settings) -> None:
-    await message.answer(
-        texts.LIKE_NOTE_ASK.format(max_len=settings.note_max_len),
-        reply_markup=kb.NOTE_CANCEL,
-    )
+async def note_hint(message: Message, state: FSMContext, bot: Bot,
+                    settings: Settings) -> None:
+    await screen.drop(message)
+    await _note_prompt(bot, message.chat.id, state, settings,
+                       "Напишите сообщение текстом.")
 
 
 # ───────────── Ответ на уведомление «вы кому-то понравились» ────────────────
@@ -341,14 +431,10 @@ async def from_reminder(call: CallbackQuery, state: FSMContext, bot: Bot,
                         user: Mapping[str, Any], settings: Settings) -> None:
     """Переход в ленту прямо из напоминания."""
     await call.answer()
-    if not user["registered"]:
-        await call.message.answer("Сначала заполните анкету — /start")
-        return
-    if not user["is_active"]:
+    if user["registered"] and not user["is_active"]:
         await users_repo.update_user(user["id"], is_active=1)
         user = await users_repo.get_user(user["id"])
-    await state.update_data(feed=[], feed_mode="search", card_msgs=[])
-    await show_next(bot, call.message.chat.id, state, user, settings)
+    await open_feed(bot, call.message.chat.id, state, user, settings)
 
 
 @router.callback_query(F.data == "br:next")
@@ -361,11 +447,8 @@ async def next_profile(call: CallbackQuery, state: FSMContext, bot: Bot,
 @router.callback_query(F.data == "br:stop")
 async def stop_feed(call: CallbackQuery, state: FSMContext, bot: Bot,
                     user: Mapping[str, Any], is_admin: bool) -> None:
-    data = await state.get_data()
-    await profile.delete_messages(bot, call.message.chat.id, data.get("card_msgs") or [])
-    await state.clear()
     await call.answer()
-    await menu_handlers.show_main_menu(call.message, user, is_admin)
+    await menu_handlers.show_menu(bot, call.message.chat.id, state, user, is_admin)
 
 
 # ───────────────────── Уведомления о симпатиях ──────────────────────────────

@@ -137,7 +137,7 @@ def render_short(s: dict[str, Any]) -> str:
         f"👥 Анкет: <b>{s['registered']}</b>   Новых сегодня: +{s['new_today']}\n"
         f"🔥 Активны за сутки: {s['active_day']}\n\n"
         f"🚨 Открытых жалоб: <b>{s['reports_open']}</b>\n"
-        f"☑️ Ждут верификации: <b>{s['verify_wait']}</b>\n"
+        f"✅ Ждут верификации: <b>{s['verify_wait']}</b>\n"
         f"🚫 Забанено: {s['banned']}\n"
         f"🛡 Автоблокировок: {s['af_autobans']}"
     )

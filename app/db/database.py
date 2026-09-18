@@ -218,6 +218,15 @@ CREATE INDEX IF NOT EXISTS idx_ads_active ON ads (is_active, shows);
 EARTH_RADIUS_KM = 6371.0088
 
 
+def norm_text(text: str | None) -> str:
+    """Сравнимый вид названия места: регистр, ё/е, лишние пробелы.
+
+    Встроенный lower() в SQLite не понимает кириллицу, поэтому города и
+    регионы в запросах сравниваются этой функцией (в SQL она — norm()).
+    """
+    return " ".join((text or "").lower().replace("ё", "е").split())
+
+
 def haversine(lat1: float | None, lon1: float | None,
               lat2: float | None, lon2: float | None) -> float | None:
     """Расстояние между двумя точками в километрах."""
@@ -276,6 +285,7 @@ class Database:
         await self._conn.execute("PRAGMA foreign_keys=ON")
         # Считать расстояние прямо в SQL — так поиск «рядом» делается одним запросом
         await self._conn.create_function("dist_km", 4, haversine, deterministic=True)
+        await self._conn.create_function("norm", 1, norm_text, deterministic=True)
         # Порядок важен: сначала таблицы, потом недостающие колонки и только
         # затем индексы — иначе индекс по новой колонке упадёт на старой базе.
         await self._conn.executescript(SCHEMA)

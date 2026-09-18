@@ -33,10 +33,12 @@ os.environ.update(
 
 from aiogram import Bot, Dispatcher                                    # noqa: E402
 from aiogram.client.default import DefaultBotProperties                # noqa: E402
+from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup     # noqa: E402
 from aiogram.enums import ParseMode                                    # noqa: E402
 from aiogram.fsm.storage.base import StorageKey                        # noqa: E402
+from aiogram.fsm.storage.memory import MemoryStorage                   # noqa: E402
 
-from app import handlers, middlewares                                  # noqa: E402
+from app import handlers, middlewares, texts                           # noqa: E402
 from app.config import get_settings                                    # noqa: E402
 from app.db import ads as ads_repo                                     # noqa: E402
 from app.db import captcha as captcha_repo                             # noqa: E402
@@ -44,9 +46,11 @@ from app.db import moderation as mod_repo                              # noqa: E
 from app.db import reactions as reactions_repo                         # noqa: E402
 from app.db import users as users_repo                                 # noqa: E402
 from app.db.database import db                                         # noqa: E402
-from app.services import antifraud, reengagement                       # noqa: E402
+from app.services import antifraud, reengagement, screen               # noqa: E402
 from app.keyboards import inline as kb_inline                           # noqa: E402
+from app.middlewares.screen_ctx import NAV_PREFIXES                     # noqa: E402
 from app.services import captcha as captcha_service                    # noqa: E402
+from app.services import profile as profile_service                    # noqa: E402
 from main import build_storage                                         # noqa: E402
 from tests.fake_telegram import (                                      # noqa: E402
     FakeSession, callback_update, location_update, message_update,
@@ -58,6 +62,8 @@ DAVE, EVE, FRANK = 100004, 100005, 100006
 GLEB, HELEN, MOD1, MOD2 = 100007, 100008, 100009, 100010
 NINA, OLEG = 100011, 100012
 SCREEN = 100013
+RESTART, NEWBIE, CAPTCHA_LOOK = 100014, 100015, 100016
+M_SAMARA, M_REGION, F_SAMARA, F_REGION, F_TLT, F_MSK, F_LEGACY = range(100020, 100027)
 EXTRAS = list(range(200001, 200009))        # массовка для ленты
 
 passed = failed = 0
@@ -96,8 +102,21 @@ class Harness:
         await self.feed(update)
         return update.message.message_id
 
+    async def screen_ids(self, user_id: int) -> list[int]:
+        """Сообщения, которые бот сейчас считает экраном пользователя."""
+        key = StorageKey(bot_id=self.bot.id, chat_id=user_id, user_id=user_id,
+                         destiny=screen.DESTINY)
+        return list((await self.dp.storage.get_data(key)).get(screen.MESSAGES) or [])
+
     async def click(self, user_id: int, data: str, **kwargs) -> None:
-        await self.feed(callback_update(self.bot, user_id, data, **kwargs))
+        # Как у живого человека: кнопки экрана жмут на самом экране, а кнопки
+        # уведомлений — на уведомлении (отдельном сообщении)
+        message_id = None
+        if data.startswith(NAV_PREFIXES + ("rep:",)):
+            ids = await self.screen_ids(user_id)
+            message_id = ids[-1] if ids else None
+        await self.feed(callback_update(self.bot, user_id, data,
+                                        message_id=message_id, **kwargs))
 
     async def photo(self, user_id: int) -> None:
         await self.feed(photo_update(self.bot, user_id))
@@ -142,12 +161,11 @@ async def register(h: Harness, user_id: int, *, gender: str, looking: str,
     await h.photo(user_id)
     await h.text(user_id, "Люблю горы, кофе и долгие разговоры.")
     await h.text(user_id, city)
-    await h.click(user_id, "reg:scope:city")
     await h.click(user_id, "reg:confirm")
 
 
 async def make_profile(user_id: int, *, gender: str, name: str,
-                       city: str = "Волгоград", region: str = "Волгоградская область",
+                       city: str = "Волгоград", region: str | None = "Волгоградская область",
                        lat: float = 48.708, lon: float = 44.513) -> None:
     """Готовая анкета напрямую в базе — чтобы не проходить мастер ради массовки."""
     await users_repo.ensure_user(user_id, f"user{user_id}", name)
@@ -163,8 +181,12 @@ async def make_profile(user_id: int, *, gender: str, name: str,
 async def main() -> int:
     settings = get_settings()
     await db.connect(settings.db_path)
-    storage = await build_storage(settings)
-    await storage.redis.flushdb()          # прогон должен начинаться с чистого листа
+    if os.environ.get("TEST_REDIS_URL") == "memory":
+        # Без Redis (например, на Windows): диалоги живут в памяти процесса
+        storage = MemoryStorage()
+    else:
+        storage = await build_storage(settings)
+        await storage.redis.flushdb()      # прогон должен начинаться с чистого листа
     try:
         return await scenarios(Harness(storage), settings, storage)
     finally:
@@ -299,11 +321,13 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     await h.text(ALICE, "Волгоградская область")
     user = await users_repo.get_user(ALICE)
     check(user["region"] == "Волгоградская область", "область определена")
+    check(user["city"] == "Урюпинск", "название посёлка сохранено как было")
     check(user["lat"] is not None, "координаты области подставлены")
+    # Вопроса «где искать» больше нет: лента сама идёт от ближних к дальним
+    check(h.said("Вот как её увидят другие"), "сразу показан предпросмотр анкеты")
+    check(user["search_scope"] == "city", "лента начнётся с её места")
     h.clear()
 
-    await h.click(ALICE, "reg:scope:region")
-    check(h.said("Вот как её увидят другие"), "показан предпросмотр анкеты")
     await h.click(ALICE, "reg:confirm")
     user = await users_repo.get_user(ALICE)
     check(user["registered"] == 1 and user["is_active"] == 1, "анкета опубликована")
@@ -334,10 +358,9 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     check(h.said("Геопозиция принята"), "пользователю подтвердили приём")
     h.clear()
 
-    await h.click(BOB, "reg:scope:near")
     await h.click(BOB, "reg:confirm")
     user = await users_repo.get_user(BOB)
-    check(user["search_scope"] == "near", "включён поиск по расстоянию")
+    check(user["search_scope"] == "near", "с геопозицией лента начинается с тех, кто рядом")
 
     # ── 6. Лента и совпадение ───────────────────────────────────────────────
     section("6. Лента, лайки и совпадение")
@@ -449,7 +472,8 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     check(user["verify_forced"] == 0, "блокировка снята")
     h.clear()
     await h.text(CAROL, "👤 Моя анкета")
-    check(h.said("☑️"), "в анкете появилась галочка")
+    check(h.said("24 года ✅"), "в анкете появилась зелёная галочка")
+    check(not h.said("☑️"), "серой галочки нигде нет")
     h.clear()
 
     # ── 11. Бан и разбан ────────────────────────────────────────────────────
@@ -999,15 +1023,161 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     progress_shown = any("Экранов" in (getattr(c, "text", "") or "")
                          for c in h.session.calls)
     check(progress_shown, "заполненное видно строкой прогресса, а не сообщениями")
+    check(h.said("Вот как её увидят другие"), "предпросмотр показан")
     h.clear()
 
-    await h.click(SCREEN, "reg:scope:city", username="screenuser")
-    check(h.said("Вот как её увидят другие"), "предпросмотр показан")
     await h.click(SCREEN, "reg:confirm", username="screenuser")
     preview_removed = bool(h.session.of_type("DeleteMessage"))
     check(preview_removed, "после подтверждения предпросмотр убирается")
     check((await users_repo.get_user(SCREEN))["registered"] == 1,
           "анкета опубликована")
+    check(h.session.visible(SCREEN) == 1, "после регистрации в чате одно сообщение — меню")
+
+    # ── 25. Повторный /start ────────────────────────────────────────────────
+    section("25. Повторный /start не копит шаги")
+    await users_repo.ensure_user(RESTART, "restarter", "Рестарт")
+    await users_repo.update_user(RESTART, captcha_passed=1, rules_accepted=1)
+    h.clear()
+    commands = [await h.text(RESTART, "/start", username="restarter") for _ in range(3)]
+    deleted = {c.message_id for c in h.session.of_type("DeleteMessage")
+               if c.chat_id == RESTART}
+    check(set(commands) <= deleted, "сами команды /start из чата убраны")
+    check(h.session.visible(RESTART) == 1, "в чате один «Шаг 1 из 7», а не три")
+    check(h.said("Шаг 1 из 7"), "показан первый шаг анкеты")
+
+    for _ in range(3):
+        await h.text(NEWBIE, "/start", username="newbie2")
+    check(h.session.visible(NEWBIE) == 1, "капча при повторном /start не дублируется")
+    h.clear()
+
+    # ── 26. Главное меню ────────────────────────────────────────────────────
+    section("26. Главное меню — в сообщении, а не внизу")
+    await h.text(SCREEN, "/start", username="screenuser")
+    menus = [c for c in h.session.calls if getattr(c, "chat_id", None) == SCREEN
+             and "Главное меню" in (getattr(c, "text", "") or "")]
+    check(bool(menus), "меню показано")
+    markup = menus[-1].reply_markup if menus else None
+    check(isinstance(markup, InlineKeyboardMarkup) and "m:search" in str(markup),
+          "кнопки меню прикреплены к сообщению")
+    check(h.said("Вас лайкнули") and h.said("Взаимных симпатий"), "в меню сводка по анкете")
+    check(not any(isinstance(getattr(c, "reply_markup", None), ReplyKeyboardMarkup)
+                  for c in h.session.calls), "нижней клавиатуры с меню нет")
+    check(h.session.visible(SCREEN) == 1, "в чате одно сообщение — меню")
+    h.clear()
+
+    await h.click(SCREEN, "m:help", username="screenuser")
+    check(bool(h.session.of_type("EditMessageText"))
+          and not h.session.of_type("SendMessage"), "справка открывается в том же сообщении")
+    await h.click(SCREEN, "m:home", username="screenuser")
+    check(h.session.visible(SCREEN) == 1, "после переходов сообщение по-прежнему одно")
+    h.clear()
+
+    await h.click(SCREEN, "m:matches", username="screenuser")
+    alert = h.session.last("AnswerCallbackQuery")
+    check(alert is not None and alert.show_alert and "пока нет" in (alert.text or ""),
+          "пустой раздел — всплывашкой, без нового сообщения")
+    junk = await h.text(SCREEN, "как дела?", username="screenuser")
+    check(junk in {c.message_id for c in h.session.of_type("DeleteMessage")},
+          "непонятное сообщение убирается")
+    check(h.said("Не понял"), "меню подсказывает, что нажать")
+    check(h.session.visible(SCREEN) == 1, "меню так и осталось одним сообщением")
+    h.clear()
+
+    # ── 27. Лента как в Дайвинчике ──────────────────────────────────────────
+    section("27. Лента: «Самара» и «Самарская область» — соседи")
+    cfg.af_fast_streak = 10_000           # листаем быстро — это тест, не накрутка
+
+    # Возраст 40 — чтобы в ленту не попала массовка из прошлых разделов
+    samara = dict(city="Самара", region="Самарская область", lat=53.1959, lon=50.1002)
+    tlt = dict(city="Тольятти", region="Самарская область", lat=53.5078, lon=49.4204)
+    msk = dict(city="Москва", region="Москва", lat=55.7558, lon=37.6173)
+    for uid, gender, name, place in (
+            (M_SAMARA, "m", "Самарец", samara), (F_SAMARA, "f", "Самарчанка", samara),
+            (F_TLT, "f", "Тольяттинка", tlt), (F_MSK, "f", "Москвичка", msk)):
+        await make_profile(uid, gender=gender, name=name, **place)
+        await users_repo.update_user(uid, age=40, age_min=35, age_max=45)
+
+    h.clear()
+    await register(h, F_REGION, gender="f", looking="m", age="40",
+                   name="Областная", city="Самарская область")
+    user = await users_repo.get_user(F_REGION)
+    check(not h.said("Не нашёл такой город"), "«Самарская область» принята без переспросов")
+    check(user["city"] == user["region"] == "Самарская область",
+          "запомнена область целиком")
+    check(user["registered"] == 1, "анкета с областью опубликована")
+
+    await register(h, M_REGION, gender="m", looking="f", age="40",
+                   name="Областной", city="Самарская обл")
+    check((await users_repo.get_user(M_REGION))["city"] == "Самарская область",
+          "сокращение «обл» тоже понятно")
+
+    async def feed_order(viewer: int) -> list[int]:
+        order: list[int] = []
+        await h.text(viewer, "🔍 Смотреть анкеты")
+        for _ in range(20):
+            current = (await h.state_data(viewer)).get("current")
+            if not current or current in order:
+                break
+            order.append(current)
+            await h.click(viewer, f"br:dislike:{current}")
+        return order
+
+    h.clear()
+    order = await feed_order(M_SAMARA)
+    check(set(order[:2]) == {F_SAMARA, F_REGION},
+          "житель Самары первыми видит Самару и тех, кто указал область")
+    check(order[2:] == [F_TLT, F_MSK], f"дальше область, потом другой город: {order}")
+    captions = {c.caption: c for c in h.session.of_type("SendPhoto")
+                if c.chat_id == M_SAMARA and c.caption}
+    tlt_card = next((cap for cap in captions if "Тольяттинка" in cap), "")
+    msk_card = next((cap for cap in captions if "Москвичка" in cap), "")
+    check("дальше вся Самарская область" in tlt_card,
+          "над первой анкетой из области — строка, что город кончился")
+    check("других городов" in msk_card, "над первой анкетой издалека — тоже")
+    check("км от вас" in msk_card, "у анкеты из другого города видно расстояние")
+    end_screen = [c for c in h.session.of_type("SendMessage")
+                  if "Вы посмотрели все анкеты" in (c.text or "")]
+    check(bool(end_screen), "в конце — новый экран, а не «😔 закончились»")
+    check(bool(end_screen) and "br:reset" in str(end_screen[-1].reply_markup),
+          "в конце можно вернуть пропущенных")
+    check(h.session.visible(M_SAMARA) == 1, "лента не оставляет старых карточек")
+    h.clear()
+
+    order = await feed_order(M_REGION)
+    check(set(order[:3]) == {F_SAMARA, F_REGION, F_TLT},
+          "кто указал область, видит всю область сразу")
+    check(order[3:] == [F_MSK], "другие регионы — после неё")
+    h.clear()
+
+    await h.click(M_SAMARA, "br:reset")
+    check((await h.state_data(M_SAMARA)).get("current") in {F_SAMARA, F_REGION},
+          "пропущенные вернулись, лента началась заново со своих")
+    cfg.af_fast_streak = saved[0]
+    h.clear()
+
+    # Прежняя версия записывала область как город с другим регистром
+    await make_profile(F_LEGACY, gender="f", name="Старожилка", city="Самарская Область",
+                       region="Самарская область", lat=53.1959, lon=50.1002)
+    await users_repo.update_user(F_LEGACY, age=40, age_min=35, age_max=45)
+    rows = await users_repo.search_candidates(await users_repo.get_user(M_SAMARA))
+    tiers = {int(r["id"]): int(r["area_tier"]) for r in rows}
+    check(tiers.get(F_LEGACY) == users_repo.AREA_LOCAL,
+          "«Самарская Область» из старой записи — тоже своя для Самары")
+    legacy_card = profile_service.render_card(await users_repo.get_user(F_LEGACY))
+    check("Область, Самарская" not in legacy_card, "в карточке область не повторяется")
+
+    # ── 28. Тексты: предупреждение и капча ──────────────────────────────────
+    section("28. Предупреждение в цитате, капча без каши")
+    warning = texts.WARNING.format(min_age=18)
+    check(warning.startswith("<blockquote>") and warning.endswith("</blockquote>"),
+          "предупреждение целиком в цитате")
+    await h.text(CAPTCHA_LOOK, "/start", username="looker")
+    caption = h.session.last("SendPhoto").caption
+    check("<blockquote>" in caption and "Выберите" in caption,
+          "в капче задание и правило в цитате")
+    check("Перед входом" not in caption and len(caption) < 400,
+          f"подпись короткая ({len(caption)} симв.)")
+    h.clear()
 
     print(f"\n\033[1mИтог: {passed} успешно, {failed} с ошибкой\033[0m")
     return 1 if failed else 0

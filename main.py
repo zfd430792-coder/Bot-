@@ -39,12 +39,16 @@ async def build_storage(settings: Settings) -> RedisStorage:
     для нескольких воркеров."""
     storage = RedisStorage.from_url(
         settings.redis_url,
+        # with_destiny обязателен: экран (services/screen.py) хранится в своей
+        # «destiny», отдельно от диалога, и не должен с ним смешиваться
         key_builder=DefaultKeyBuilder(
             prefix=settings.redis_prefix, with_bot_id=True, with_destiny=True
         ),
-        # Незаконченный диалог живёт сутки, потом чистится сам
+        # Незаконченный диалог живёт сутки, потом чистится сам. Данные — двое
+        # суток: столько Telegram разрешает удалять сообщения, так что экран,
+        # который бот помнит, всё ещё можно убрать
         state_ttl=86_400,
-        data_ttl=86_400,
+        data_ttl=172_800,
     )
     try:
         await storage.redis.ping()

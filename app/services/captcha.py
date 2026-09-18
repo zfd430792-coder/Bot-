@@ -356,7 +356,7 @@ def generate() -> Challenge:
     img.convert("RGB").save(buf, format="PNG", optimize=True)
 
     tokens = {secrets.token_hex(5): label for label in labels}
-    task = f"выберите <b>все {COLORS[target_color][0]} {SHAPES[target_shape]}</b>"
+    task = f"<b>все {COLORS[target_color][0]} {SHAPES[target_shape]}</b>"
     return Challenge(task=task, correct=sorted(correct), tokens=tokens, image=buf.getvalue())
 
 

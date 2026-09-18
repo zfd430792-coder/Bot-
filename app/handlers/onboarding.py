@@ -1,4 +1,8 @@
-"""Вход в бота: капча -> приветствие -> предупреждение о мошенниках."""
+"""Вход в бота: капча -> приветствие -> предупреждение о мошенниках.
+
+Всё это — один экран: следующий шаг заменяет предыдущий, а повторный /start
+убирает то, что было на экране, вместо того чтобы прислать ещё одну копию.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -21,6 +25,7 @@ from app.handlers import menu as menu_handlers
 from app.handlers import registration
 from app.keyboards import inline as kb
 from app.services import captcha as captcha_service
+from app.services import profile, screen
 from app.services.notify import admin_log
 from app.states import Onboarding
 
@@ -36,13 +41,33 @@ _countdown_tasks: set[asyncio.Task] = set()
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext, bot: Bot, user: Mapping[str, Any],
                 settings: Settings, is_admin: bool) -> None:
+    await screen.drop(message)          # сама команда в чате не нужна
+    await begin(bot, message.chat.id, state, user, settings, is_admin,
+                first_name=message.from_user.first_name or "")
+
+
+@router.callback_query(F.data == "m:start")
+async def start_button(call: CallbackQuery, state: FSMContext, bot: Bot,
+                       user: Mapping[str, Any], settings: Settings,
+                       is_admin: bool) -> None:
+    await call.answer()
+    await begin(bot, call.message.chat.id, state, user, settings, is_admin,
+                first_name=call.from_user.first_name or "")
+
+
+async def begin(bot: Bot, chat_id: int, state: FSMContext, user: Mapping[str, Any],
+                settings: Settings, is_admin: bool, *, first_name: str = "") -> None:
+    """Вход с любого места: капча, правила, анкета или меню — что нужно сейчас."""
     await state.clear()
+    # До правил нижних клавиатур бот не показывал никогда — снимать нечего
+    if not user["rules_accepted"]:
+        await screen.assume_clean_keyboard(state)
 
     # Приём новых анкет можно приостановить из админ-панели.
     # Проверяем до капчи: незачем гонять новичка через задание, если вход закрыт.
     if (not user["registered"] and not is_admin
             and await mod_repo.get_setting("registration_open", "1") != "1"):
-        await message.answer(texts.REGISTRATION_CLOSED)
+        await screen.send(bot, chat_id, state, texts.REGISTRATION_CLOSED)
         return
 
     # Владельцу капча не показывается — проверка нужна против ботов, не против него
@@ -54,60 +79,50 @@ async def start(message: Message, state: FSMContext, bot: Bot, user: Mapping[str
     if not user["captcha_passed"]:
         blocked = await captcha_repo.blocked_seconds(user["id"])
         if blocked:
-            await message.answer(
-                texts.CAPTCHA_BLOCKED.format(minutes=max(1, blocked // 60))
-            )
+            await screen.send(bot, chat_id, state, texts.CAPTCHA_BLOCKED.format(
+                minutes=max(1, blocked // 60)))
             return
-        await issue_captcha(bot, message.chat.id, state, settings, intro=True)
+        await issue_captcha(bot, chat_id, state, settings)
         return
 
     if user["registered"]:
-        await menu_handlers.show_main_menu(message, user, is_admin)
+        await menu_handlers.show_menu(bot, chat_id, state, user, is_admin)
         return
 
     if not user["rules_accepted"]:
-        await send_welcome(message, state, user)
+        await send_welcome(bot, chat_id, state, user)
         return
 
     # Регистрация не была доведена до конца — продолжаем с того же места
-    await registration.resume(message, state, user, settings)
+    await registration.resume(bot, chat_id, state, user, settings, first_name)
 
 
 # ──────────────────────────────── Капча ─────────────────────────────────────
 
 async def issue_captcha(bot: Bot, chat_id: int, state: FSMContext,
-                        settings: Settings, *, intro: bool = False,
-                        note: str | None = None) -> None:
-    """Генерирует и присылает новое задание капчи."""
+                        settings: Settings, *, title: str = texts.CAPTCHA_TITLE) -> None:
+    """Генерирует и присылает новое задание капчи вместо прежнего экрана."""
     # Рисование картинки — работа для CPU, уводим её из основного потока
     challenge = await asyncio.to_thread(captcha_service.generate)
     used = await captcha_repo.attempts_used(chat_id)
-
-    caption_parts = []
-    if intro:
-        caption_parts.append(texts.CAPTCHA_INTRO)
-    if note:
-        caption_parts.append(note)
-    caption_parts.append(texts.CAPTCHA_TASK.format(
+    caption = texts.CAPTCHA_TASK.format(
+        title=title,
         task=challenge.task,
         attempt=min(used + 1, settings.captcha_max_attempts),
         total=settings.captcha_max_attempts,
-    ))
+    )
 
     data = await state.get_data()
-    old_message = data.get("cap_msg")
-    if old_message:
-        try:
-            await bot.delete_message(chat_id, old_message)
-        except TelegramBadRequest:
-            pass
-
+    refreshes = int(data.get("cap_refresh", 0))
+    await screen.prepare(bot, chat_id, state)
     sent = await bot.send_photo(
         chat_id,
         BufferedInputFile(challenge.image, filename="captcha.png"),
-        caption="\n\n".join(caption_parts),
-        reply_markup=kb.captcha(challenge.buttons, set()),
+        caption=caption,
+        reply_markup=kb.captcha(challenge.buttons, set(),
+                                refreshes < settings.captcha_max_refresh),
     )
+    await screen.remember(state, [sent.message_id])
 
     await state.set_state(Onboarding.captcha)
     await state.update_data(
@@ -115,13 +130,13 @@ async def issue_captcha(bot: Bot, chat_id: int, state: FSMContext,
         cap_correct=challenge.correct,
         cap_selected=[],
         cap_started=time.monotonic(),
-        cap_msg=sent.message_id,
-        cap_refresh=data.get("cap_refresh", 0),
+        cap_refresh=refreshes,
     )
 
 
 @router.callback_query(F.data.startswith("cap:tok:"), Onboarding.captcha)
-async def captcha_toggle(call: CallbackQuery, state: FSMContext) -> None:
+async def captcha_toggle(call: CallbackQuery, state: FSMContext,
+                         settings: Settings) -> None:
     """Переключает клетку. Токен ничего не выдаёт — маппинг живёт на сервере."""
     token = (call.data or "").removeprefix("cap:tok:")
     data = await state.get_data()
@@ -136,7 +151,7 @@ async def captcha_toggle(call: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(cap_selected=sorted(selected))
 
     buttons = sorted(tokens.items(), key=lambda kv: kv[1])
-    can_refresh = data.get("cap_refresh", 0) < 3
+    can_refresh = int(data.get("cap_refresh", 0)) < settings.captcha_max_refresh
     try:
         await call.message.edit_reply_markup(
             reply_markup=kb.captcha(buttons, selected, can_refresh)
@@ -183,7 +198,7 @@ async def captcha_submit(call: CallbackQuery, state: FSMContext, bot: Bot,
     if elapsed_ms > settings.captcha_timeout_seconds * 1000:
         await call.answer()
         await issue_captcha(bot, call.message.chat.id, state, settings,
-                            note=texts.CAPTCHA_EXPIRED)
+                            title=texts.CAPTCHA_EXPIRED)
         return
 
     if not captcha_service.check(correct, selected):
@@ -196,21 +211,13 @@ async def captcha_submit(call: CallbackQuery, state: FSMContext, bot: Bot,
     await users_repo.update_user(user["id"], captcha_passed=1)
     await mod_repo.log_event("captcha_pass", user["id"], ms=int(elapsed_ms))
     await call.answer(texts.CAPTCHA_PASSED)
-    try:
-        await call.message.delete()
-    except TelegramBadRequest:
-        pass
-    await state.update_data(cap_msg=None)
 
     if user["registered"]:
         # Проверку сбросила антинакрутка — возвращаем человека в меню
-        await state.clear()
-        await menu_handlers.show_main_menu(
-            call.message, user, is_admin,
-            text="✅ Проверка пройдена. Продолжаем!",
-        )
+        await menu_handlers.show_menu(bot, call.message.chat.id, state, user, is_admin,
+                                      note="✅ Проверка пройдена. Продолжаем!")
         return
-    await send_welcome(call.message, state, user)
+    await send_welcome(bot, call.message.chat.id, state, user)
 
 
 async def _fail_captcha(call: CallbackQuery, state: FSMContext, bot: Bot,
@@ -222,12 +229,9 @@ async def _fail_captcha(call: CallbackQuery, state: FSMContext, bot: Bot,
     await mod_repo.log_event("captcha_fail", user["id"], reason=reason)
 
     if left <= 0:
-        try:
-            await call.message.delete()
-        except TelegramBadRequest:
-            pass
         await state.clear()
-        await call.message.answer(texts.CAPTCHA_BLOCKED.format(minutes=block_minutes))
+        await screen.send(bot, call.message.chat.id, state,
+                          texts.CAPTCHA_BLOCKED.format(minutes=block_minutes))
         await admin_log(
             bot,
             f"🤖 Капча: пользователь <code>{user['id']}</code> "
@@ -237,36 +241,28 @@ async def _fail_captcha(call: CallbackQuery, state: FSMContext, bot: Bot,
         return
 
     await issue_captcha(bot, call.message.chat.id, state, settings,
-                        note=texts.CAPTCHA_WRONG.format(left=left))
+                        title=texts.CAPTCHA_WRONG)
 
 
 # ───────────────────── Приветствие и предупреждение ─────────────────────────
 
-async def send_welcome(message: Message, state: FSMContext,
+async def send_welcome(bot: Bot, chat_id: int, state: FSMContext,
                        user: Mapping[str, Any]) -> None:
-    name = user["tg_name"] or "друг"
     await state.set_state(Onboarding.welcome)
-    await message.answer(
-        texts.WELCOME.format(name=name),
-        reply_markup=kb.WELCOME_NEXT,
-    )
+    await screen.send(bot, chat_id, state,
+                      texts.WELCOME.format(name=profile.esc(user["tg_name"] or "друг")),
+                      kb.WELCOME_NEXT)
 
 
 @router.callback_query(F.data == "onb:next")
 async def show_warning(call: CallbackQuery, state: FSMContext, bot: Bot,
                        settings: Settings) -> None:
-    """Приветствие удаляется, на его месте появляется предупреждение."""
+    """Приветствие уходит, на его месте появляется предупреждение."""
     await call.answer()
-    try:
-        await call.message.delete()
-    except TelegramBadRequest:
-        pass
-
     seconds = max(1, settings.rules_delay_seconds)
     warning = texts.WARNING.format(min_age=settings.min_age)
-    sent = await call.message.answer(
-        warning + texts.WARNING_COUNTDOWN.format(sec=seconds)
-    )
+    sent = await screen.send(bot, call.message.chat.id, state,
+                             warning + texts.WARNING_COUNTDOWN.format(sec=seconds))
     await state.set_state(Onboarding.rules)
 
     task = asyncio.create_task(
@@ -302,28 +298,24 @@ async def _countdown(bot: Bot, chat_id: int, message_id: int, seconds: int,
 
 @router.callback_query(F.data == "onb:accept")
 async def accept_rules(call: CallbackQuery, state: FSMContext, bot: Bot,
-                       user: Mapping[str, Any], settings: Settings) -> None:
+                       user: Mapping[str, Any]) -> None:
     await users_repo.update_user(user["id"], rules_accepted=1)
     await call.answer(texts.RULES_ACCEPTED)
-    # Предупреждение прочитано и принято — убираем, чтобы не висело над анкетой
-    try:
-        await call.message.delete()
-    except TelegramBadRequest:
-        pass
-
     await admin_log(
         bot,
         f"🆕 Новый пользователь: <code>{user['id']}</code> "
-        f"(@{user['username'] or '—'}), {user['tg_name'] or ''}"
+        f"(@{user['username'] or '—'}), {profile.esc(user['tg_name'] or '')}"
     )
-    await registration.start(call.message, state, settings)
+    # Предупреждение прочитано — первый шаг анкеты встаёт на его место
+    await registration.start(bot, call.message.chat.id, state)
 
 
 # ─────────────────────── Повторная проверка username ────────────────────────
 
 @router.callback_query(F.data == "onb:username")
-async def recheck_username(call: CallbackQuery, state: FSMContext,
-                           settings: Settings) -> None:
+async def recheck_username(call: CallbackQuery, state: FSMContext, bot: Bot,
+                           user: Mapping[str, Any], settings: Settings,
+                           is_admin: bool) -> None:
     username = call.from_user.username
     if not username:
         await call.answer(texts.USERNAME_STILL_MISSING, show_alert=True)
@@ -334,4 +326,6 @@ async def recheck_username(call: CallbackQuery, state: FSMContext,
         await call.message.delete()
     except TelegramBadRequest:
         pass
-    await call.message.answer("Продолжаем — нажмите /start")
+    fresh = await users_repo.get_user(call.from_user.id)
+    await begin(bot, call.message.chat.id, state, fresh, settings, is_admin,
+                first_name=call.from_user.first_name or "")

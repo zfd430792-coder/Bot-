@@ -198,6 +198,43 @@ def find_region(query: str, limit: int = 5) -> list[City]:
     return [anchors[name] for name in close][:limit]
 
 
+# По этим словам видно, что назвали регион, а не город
+REGION_WORDS = ("област", " обл ", "край", "республик", "округ", " ао ")
+
+
+def region_place(anchor: City) -> City:
+    """Место «регион целиком»: название — сам регион, точка — его центр.
+
+    Так сохраняется человек, который указал только область: в анкете видно
+    «📍 Самарская область», а в поиске он свой для любого города этой области.
+    """
+    return City(anchor.region, anchor.region, anchor.country, anchor.lat, anchor.lon)
+
+
+def find_whole_region(query: str) -> City | None:
+    """Узнаёт регион, названный вместо города: «Самарская область», «Подмосковье».
+
+    None — это похоже на обычный город или посёлок; тогда бот, как и раньше,
+    уточнит область отдельным вопросом.
+    """
+    key = REGION_ALIASES.get(normalize(query), normalize(query))
+    if len(key) < 4:
+        return None
+    anchors = _region_anchors()
+    if key in anchors:
+        return region_place(anchors[key])
+    # «Самарская» вместо «Самарская область»
+    starts = [name for name in anchors if name.startswith(key + " ")]
+    if len(starts) == 1:
+        return region_place(anchors[starts[0]])
+    # «Самарская обл», «Пермский кр.» и опечатки — только если назвали сам тип региона
+    if any(word in f" {key} " for word in REGION_WORDS):
+        hits = find_region(query, limit=1)
+        if hits:
+            return region_place(hits[0])
+    return None
+
+
 def jitter(lat: float, lon: float, meters: int = 350) -> tuple[float, float]:
     """Небольшой случайный сдвиг координат.
 

@@ -19,6 +19,7 @@ from app.db import moderation as mod_repo
 from app.db import users as users_repo
 from app.keyboards import inline as kb
 from app.services import profile as profile_service
+from app.services import screen
 from app.services.notify import safe_send
 from app.states import Verification
 
@@ -33,8 +34,10 @@ def new_code(length: int = 4) -> str:
 
 
 async def request_verification(bot: Bot, user_id: int, *, forced: bool,
-                               admin_id: int | None = None) -> str | None:
-    """Создаёт заявку и уведомляет пользователя.
+                               admin_id: int | None = None,
+                               notify: bool = True) -> str | None:
+    """Создаёт заявку и уведомляет пользователя (notify=False — экран
+    покажет вызывающий).
 
     Возвращает код либо None, если это владелец бота — на него ограничения
     не действуют, и запереть его требованием проверки нельзя.
@@ -51,8 +54,9 @@ async def request_verification(bot: Bot, user_id: int, *, forced: bool,
     await mod_repo.log_event("verify_requested", user_id, forced=forced,
                              admin_id=admin_id)
 
-    text = (texts.VERIFY_REQUIRED if forced else texts.VERIFY_SELF).format(code=code)
-    await safe_send(bot, user_id, text, kb.VERIFY_START)
+    if notify:
+        text = (texts.VERIFY_REQUIRED if forced else texts.VERIFY_SELF).format(code=code)
+        await safe_send(bot, user_id, text, kb.VERIFY_START)
     return code
 
 
@@ -64,9 +68,18 @@ async def self_request(call: CallbackQuery, state: FSMContext, bot: Bot,
     if user["verify_status"] == "verified":
         await call.answer(texts.VERIFY_ALREADY, show_alert=True)
         return
+    code = await request_verification(bot, user["id"], forced=False, notify=False)
+    if code is None:
+        await call.answer("Вы владелец бота — верификация вам не нужна.", show_alert=True)
+        return
     await call.answer()
-    if await request_verification(bot, user["id"], forced=False) is None:
-        await call.message.answer("Вы владелец бота — верификация вам не нужна.")
+    await screen.show(bot, call.message.chat.id, state,
+                      texts.VERIFY_SELF.format(code=code), kb.VERIFY_SELF)
+
+
+def _upload_prompt(code: str, error: str | None = None) -> str:
+    text = texts.VERIFY_UPLOAD.format(code=code)
+    return f"⚠️ {error}\n\n{text}" if error else text
 
 
 @router.callback_query(F.data == "ver:start")
@@ -79,12 +92,8 @@ async def start_upload(call: CallbackQuery, state: FSMContext,
 
     await state.set_state(Verification.waiting_media)
     await call.answer()
-    await call.message.answer(
-        f"📸 Пришлите фото или видео, где видно ваше лицо и лист с кодом "
-        f"<code>{code}</code>.\n\n"
-        "<i>Это фото видит только администратор. В анкету оно не попадёт.</i>",
-        reply_markup=kb.VERIFY_CANCEL,
-    )
+    await screen.show(call.bot, call.message.chat.id, state,
+                      _upload_prompt(code), kb.VERIFY_CANCEL)
 
 
 @router.callback_query(F.data == "ver:cancel", Verification.waiting_media)
@@ -93,18 +102,25 @@ async def cancel_upload(call: CallbackQuery, state: FSMContext,
     await state.clear()
     await call.answer(texts.CANCELLED)
     if user["verify_forced"]:
-        await call.message.answer(
-            texts.VERIFY_REQUIRED.format(code=user["verify_code"] or "—"),
-            reply_markup=kb.VERIFY_START,
-        )
+        await screen.show(call.bot, call.message.chat.id, state,
+                          texts.VERIFY_REQUIRED.format(code=user["verify_code"] or "—"),
+                          kb.VERIFY_START)
+        return
+    # Проверку просили сами, из анкеты — туда и возвращаем
+    from app.handlers import profile as profile_handlers
+    await profile_handlers.show_profile(call.bot, call.message.chat.id, state, user["id"])
 
 
 @router.message(Verification.waiting_media)
 async def receive_media(message: Message, state: FSMContext, bot: Bot,
                         user: Mapping[str, Any], settings: Settings) -> None:
     result = profile_service.extract_media(message, max_seconds=60)
+    await screen.drop(message)
     if isinstance(result, str):
-        await message.answer(texts.VERIFY_NEED_MEDIA)
+        await screen.show(bot, message.chat.id, state,
+                          _upload_prompt(user["verify_code"] or "—",
+                                         texts.VERIFY_NEED_MEDIA),
+                          kb.VERIFY_CANCEL)
         return
 
     media_type, media_id = result
@@ -118,11 +134,11 @@ async def receive_media(message: Message, state: FSMContext, bot: Bot,
 
     await users_repo.update_user(user["id"], verify_status="pending")
     await state.clear()
-    await message.answer(texts.VERIFY_SENT)
+    await screen.show(bot, message.chat.id, state, texts.VERIFY_SENT, kb.BACK_HOME)
 
     fresh = await users_repo.get_user(user["id"])
     header = (
-        "☑️ <b>Заявка на верификацию</b>\n\n"
+        "✅ <b>Заявка на верификацию</b>\n\n"
         f"Пользователь: <b>{profile_service.esc(fresh['name'] or fresh['tg_name'])}</b>\n"
         f"<code>{fresh['id']}</code> @{fresh['username'] or '—'}\n"
         f"Код на фото должен быть: <code>{record['code']}</code>\n"

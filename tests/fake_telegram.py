@@ -23,9 +23,16 @@ class FakeSession(BaseSession):
     def __init__(self) -> None:
         super().__init__()
         self.calls: list[TelegramMethod] = []
+        # Что сейчас видно в каждом чате: отправленное ботом минус удалённое.
+        # clear() это не сбрасывает — так видно, убирает ли бот за собой.
+        self.alive: dict[int, set[int]] = {}
 
     async def close(self) -> None:
         return None
+
+    def visible(self, chat_id: int) -> int:
+        """Сколько сообщений бота сейчас видно в чате."""
+        return len(self.alive.get(chat_id, set()))
 
     async def stream_content(self, url: str, headers=None, timeout: int = 30,
                              chunk_size: int = 65536,
@@ -40,13 +47,20 @@ class FakeSession(BaseSession):
         if name == "GetMe":
             return User(id=bot.id, is_bot=True, first_name="TestBot", username="test_bot")
         if name == "CopyMessage":
-            return MessageId(message_id=next(_ids))
-        if name.startswith("Send"):
-            chat_id = getattr(method, "chat_id", 1)
+            message_id = next(_ids)
+            self.alive.setdefault(int(method.chat_id), set()).add(message_id)
+            return MessageId(message_id=message_id)
+        if name == "DeleteMessage":
+            self.alive.get(int(method.chat_id), set()).discard(method.message_id)
+            return True
+        if name.startswith("Send") and name != "SendChatAction":
+            chat_id = int(getattr(method, "chat_id", 1))
+            message_id = next(_ids)
+            self.alive.setdefault(chat_id, set()).add(message_id)
             return Message(
-                message_id=next(_ids),
+                message_id=message_id,
                 date=dt.datetime.now(dt.timezone.utc),
-                chat=Chat(id=int(chat_id), type="private"),
+                chat=Chat(id=chat_id, type="private"),
             ).as_(bot)
         # DeleteMessage, AnswerCallbackQuery, EditMessage*, SetMyCommands и прочее
         return True
@@ -148,7 +162,9 @@ def location_update(bot: Bot, user_id: int, lat: float, lon: float) -> Update:
 
 
 def callback_update(bot: Bot, user_id: int, data: str, *,
-                    username: str | None = "tester") -> Update:
+                    username: str | None = "tester",
+                    message_id: int | None = None) -> Update:
+    """message_id — сообщение, на котором нажата кнопка (по умолчанию новое)."""
     raw = {
         "update_id": next(_update_ids),
         "callback_query": {
@@ -157,7 +173,7 @@ def callback_update(bot: Bot, user_id: int, data: str, *,
             "chat_instance": "test-instance",
             "data": data,
             "message": {
-                "message_id": next(_message_ids),
+                "message_id": message_id or next(_message_ids),
                 "date": int(dt.datetime.now().timestamp()),
                 "chat": {"id": user_id, "type": "private"},
                 "from": {"id": bot.id, "is_bot": True, "first_name": "TestBot",

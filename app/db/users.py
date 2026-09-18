@@ -146,21 +146,24 @@ async def consume_like(user_id: int, limit: int) -> bool:
 
 # ───────────────────────────── Подбор анкет ─────────────────────────────────
 
-def _bbox(lat: float, lon: float, radius_km: float) -> tuple[float, float, float, float]:
-    """Грубая рамка вокруг точки — чтобы SQLite не считал расстояние для всех."""
-    import math
-
-    d_lat = radius_km / 111.0
-    cos_lat = max(0.01, math.cos(math.radians(lat)))
-    d_lon = radius_km / (111.0 * cos_lat)
-    return lat - d_lat, lat + d_lat, lon - d_lon, lon + d_lon
+# Ступени ленты: свой район -> своя область -> все остальные по расстоянию
+AREA_LOCAL, AREA_REGION, AREA_FAR = 1, 2, 3
 
 
 async def search_candidates(user: Mapping[str, Any], limit: int = 25) -> list[aiosqlite.Row]:
-    """Возвращает подходящие анкеты с учётом пола, возраста и географии.
+    """Анкеты для ленты — от ближних к дальним, как в Дайвинчике.
 
-    Порядок: сначала те, кто уже поставил нам ❤️ (быстрее случаются совпадения),
-    затем — по расстоянию (режим «рядом») или по свежести активности.
+    Жёстко отсекаются только пол, возраст, баны и уже просмотренные. География —
+    не фильтр, а порядок: сначала «свой район» (город, область или радиус —
+    как выбрал человек), затем его область, затем все остальные по расстоянию.
+    Поэтому лента не обрывается, когда в городе закончились анкеты.
+
+    Свой город понимается так, как люди его указали: кто написал только
+    область («Самарская область»), попадает в ленту к жителям Самары, и
+    наоборот — хотя названия и не совпадают.
+
+    В колонке area_tier — ступень (AREA_*). Кто уже поставил нам ❤️, идёт
+    первым на любом расстоянии: так быстрее случаются совпадения.
     """
     scope = user["search_scope"] or "city"
     params: dict[str, Any] = {
@@ -172,6 +175,10 @@ async def search_candidates(user: Mapping[str, Any], limit: int = 25) -> list[ai
         "my_age": user["age"],
         "lat": user["lat"],
         "lon": user["lon"],
+        "city": user["city"],
+        "region": user["region"],
+        "country": user["country"],
+        "radius": int(user["search_radius"] or 50),
         "limit": limit,
     }
 
@@ -188,39 +195,48 @@ async def search_candidates(user: Mapping[str, Any], limit: int = 25) -> list[ai
         "NOT EXISTS (SELECT 1 FROM reactions r WHERE r.from_id = :me AND r.to_id = u.id)",
     ]
 
-    order_geo = "u.last_active DESC"
+    same_region = "(u.region IS NOT NULL AND u.region = :region AND u.country IS :country)"
     if scope == "near" and user["lat"] is not None and user["lon"] is not None:
-        radius = int(user["search_radius"] or 50)
-        lat_min, lat_max, lon_min, lon_max = _bbox(user["lat"], user["lon"], radius)
-        params.update(
-            lat_min=lat_min, lat_max=lat_max, lon_min=lon_min, lon_max=lon_max,
-            radius=radius,
-        )
-        where += [
-            "u.lat BETWEEN :lat_min AND :lat_max",
-            "u.lon BETWEEN :lon_min AND :lon_max",
-            "dist_km(u.lat, u.lon, :lat, :lon) <= :radius",
-        ]
-        order_geo = "distance ASC"
+        area = "dist_km(u.lat, u.lon, :lat, :lon) <= :radius"
     elif scope == "region" and user["region"]:
-        params.update(region=user["region"], country=user["country"])
-        where += ["u.region = :region", "u.country IS :country"]
-    elif user["city"]:
-        params.update(city=user["city"], country=user["country"])
-        where += ["u.city = :city", "u.country IS :country"]
+        area = same_region
+    else:
+        # Тот же город — или кто-то из двоих указал область целиком
+        area = (
+            "(u.country IS :country AND :city IS NOT NULL"
+            " AND norm(u.city) = norm(:city))"
+            f" OR ({same_region} AND (norm(u.city) = norm(u.region)"
+            " OR norm(:city) = norm(:region)))"
+        )
 
     sql = f"""
-        SELECT u.*,
-               EXISTS(SELECT 1 FROM reactions r2
-                      WHERE r2.from_id = u.id AND r2.to_id = :me AND r2.kind = 'like')
-                   AS liked_me,
-               dist_km(u.lat, u.lon, :lat, :lon) AS distance
-        FROM users u
-        WHERE {' AND '.join(where)}
-        ORDER BY liked_me DESC, {order_geo}
+        SELECT * FROM (
+            SELECT u.*,
+                   EXISTS(SELECT 1 FROM reactions r2
+                          WHERE r2.from_id = u.id AND r2.to_id = :me
+                            AND r2.kind = 'like') AS liked_me,
+                   dist_km(u.lat, u.lon, :lat, :lon) AS distance,
+                   CASE WHEN {area} THEN {AREA_LOCAL}
+                        WHEN {same_region} THEN {AREA_REGION}
+                        ELSE {AREA_FAR} END AS area_tier
+            FROM users u
+            WHERE {' AND '.join(where)}
+        )
+        ORDER BY liked_me DESC, area_tier, distance IS NULL, distance, last_active DESC
         LIMIT :limit
     """
     return await db.fetchall(sql, params)
+
+
+async def count_matches(user_id: int) -> int:
+    return int(await db.fetchval(
+        """
+        SELECT COUNT(*) FROM matches m
+        JOIN users u ON u.id = CASE WHEN m.user_a = :me THEN m.user_b ELSE m.user_a END
+        WHERE (m.user_a = :me OR m.user_b = :me) AND u.is_banned = 0
+        """,
+        {"me": user_id}, default=0,
+    ))
 
 
 async def incoming_likes(user_id: int, limit: int = 25) -> list[aiosqlite.Row]:

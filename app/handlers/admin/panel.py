@@ -12,9 +12,11 @@ from app.config import Settings
 from app.db import moderation as mod_repo
 from app.db import stats as stats_repo
 from app.db import users as users_repo
+from app.handlers import menu as menu_handlers
 from app.handlers.admin.filters import IsAdmin, IsStaff
 from app.keyboards import inline as kb
 from app.services import profile as profile_service
+from app.services import screen
 from app.services.notify import safe_send
 from app.states import AdminPanel
 
@@ -61,10 +63,12 @@ async def panel_view(is_admin: bool) -> tuple[str, Any]:
     return text, kb.admin_menu(reports, verify, is_admin=is_admin)
 
 
-async def open_panel(message: Message, state: FSMContext, is_admin: bool) -> None:
+async def open_panel(bot: Bot, chat_id: int, state: FSMContext, is_admin: bool) -> None:
+    """Панель встаёт на место главного меню, «Закрыть» возвращает меню."""
+    await state.clear()
     await state.set_state(AdminPanel.menu)
     text, markup = await panel_view(is_admin)
-    await message.answer(text, reply_markup=markup)
+    await screen.show(bot, chat_id, state, text, markup)
 
 
 @router.message(Command("admin"))
@@ -72,8 +76,14 @@ async def open_panel(message: Message, state: FSMContext, is_admin: bool) -> Non
 @router.message(F.text == "🛠 Админ-панель")
 @router.message(F.text == "👮 Модератор")
 async def admin_command(message: Message, state: FSMContext, is_admin: bool) -> None:
-    await state.clear()
-    await open_panel(message, state, is_admin)
+    await screen.drop(message)
+    await open_panel(message.bot, message.chat.id, state, is_admin)
+
+
+@router.callback_query(F.data == "m:admin")
+async def admin_button(call: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    await call.answer()
+    await open_panel(call.bot, call.message.chat.id, state, is_admin)
 
 
 @router.callback_query(F.data == "adm:menu")
@@ -88,13 +98,10 @@ async def back_to_menu(call: CallbackQuery, state: FSMContext, is_admin: bool) -
 
 
 @router.callback_query(F.data == "adm:close")
-async def close_panel(call: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
+async def close_panel(call: CallbackQuery, state: FSMContext, user,
+                      is_admin: bool) -> None:
     await call.answer()
-    try:
-        await call.message.delete()
-    except Exception:
-        pass
+    await menu_handlers.show_menu(call.bot, call.message.chat.id, state, user, is_admin)
 
 
 # ───────────────────────────── Статистика ───────────────────────────────────

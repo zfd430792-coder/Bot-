@@ -80,11 +80,19 @@ async def mark_like_seen(to_id: int, from_id: int) -> None:
     )
 
 
+async def count_dislikes(user_id: int) -> int:
+    return int(await db.fetchval(
+        "SELECT COUNT(*) FROM reactions WHERE from_id = ? AND kind = 'dislike'",
+        (user_id,), default=0,
+    ))
+
+
 async def reset_dislikes(user_id: int, older_than_days: int = 14) -> int:
     """Возвращает в выдачу тех, кого пропустили давно — анкеты не бесконечны."""
+    # <= — чтобы с нулевым сроком вернулись и пропуски этой же секунды
     cur = await db.conn.execute(
         "DELETE FROM reactions WHERE from_id = ? AND kind = 'dislike' "
-        "AND created_at < datetime('now', ?)",
+        "AND created_at <= datetime('now', ?)",
         (user_id, f"-{int(older_than_days)} days"),
     )
     await db.conn.commit()

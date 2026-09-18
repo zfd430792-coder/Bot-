@@ -4,9 +4,13 @@
 Поэтому перезапуск бота или потеря FSM не заставляют начинать сначала —
 команда /start продолжает с первого незаполненного поля.
 
-Диалог живёт одним экраном: перед новым вопросом бот удаляет и предыдущий
-вопрос, и ответ пользователя. В чате всегда видно ровно текущий шаг, а сверху
+Диалог живёт одним экраном: вопрос меняется в том же сообщении, ответ
+пользователя удаляется. В чате всегда видно ровно текущий шаг, а сверху
 короткой строкой — то, что уже заполнено.
+
+Отдельного вопроса «где искать» нет: лента сама идёт от ближних к дальним,
+как в Дайвинчике. С чего начинать — город, область или радиус — можно
+поменять в настройках.
 """
 from __future__ import annotations
 
@@ -20,6 +24,7 @@ from aiogram.types import CallbackQuery, Message
 from app import texts
 from app.config import Settings, get_settings
 from app.db import users as users_repo
+from app.db.database import norm_text
 from app.handlers import menu as menu_handlers
 from app.keyboards import inline as kb
 from app.keyboards import reply as rkb
@@ -65,10 +70,10 @@ def progress(user: Mapping[str, Any] | None) -> str:
 
 async def _step(bot: Bot, chat_id: int, state: FSMContext, text: str,
                 markup=None, error: str | None = None) -> None:
-    """Показывает шаг единственным сообщением, заменяя предыдущее."""
+    """Показывает шаг единственным сообщением вместо предыдущего."""
     user = await users_repo.get_user(chat_id)
     body = (f"⚠️ {error}\n\n" if error else "") + progress(user) + text
-    await screen.send(bot, chat_id, state, body, markup)
+    await screen.show(bot, chat_id, state, body, markup)
 
 
 # ──────────────────────────── Экраны шагов ──────────────────────────────────
@@ -136,54 +141,45 @@ async def ask_region(bot: Bot, chat_id: int, state: FSMContext,
     )
 
 
-async def ask_scope(bot: Bot, chat_id: int, state: FSMContext) -> None:
-    """Город определён — спрашиваем охват поиска и убираем нижнюю клавиатуру."""
+async def geo_done(bot: Bot, chat_id: int, state: FSMContext) -> None:
+    """Место известно. Лента начнётся с него — с точки геопозиции или с
+    города, — а дальше сама пойдёт к соседним городам."""
     user = await users_repo.get_user(chat_id)
-    settings = get_settings()
-    await screen.hide_reply_keyboard(bot, chat_id)
-    await state.set_state(Registration.scope)
-
-    # Приём геопозиции подтверждаем прямо здесь: отдельное сообщение ради
-    # одной строки — как раз то, от чего мы уходим
-    note = ""
-    if user["geo_source"] == "gps":
-        place = user["city"]
-        if user["region"] and user["region"] != user["city"]:
-            place += f", {user['region']}"
-        note = texts.REG_GEO_SAVED.format(city=profile.esc(place)) + "\n\n"
-
-    await _step(
-        bot, chat_id, state,
-        note + texts.REG_SCOPE.format(
-            city=user["city"], region=user["region"] or "—",
-            radius=user["search_radius"] or settings.default_radius_km,
-        ),
-        kb.scope(user["city"], user["region"] or "", user["geo_source"] == "gps"),
+    await users_repo.update_user(
+        chat_id,
+        search_scope="near" if user["geo_source"] == "gps" else "city",
+        search_radius=user["search_radius"] or get_settings().default_radius_km,
     )
+    await show_preview(bot, chat_id, state)
 
 
 async def show_preview(bot: Bot, chat_id: int, state: FSMContext) -> None:
     fresh = await users_repo.get_user(chat_id)
     await state.set_state(Registration.confirm)
-    await screen.clear(bot, chat_id, state)
-    await screen.hide_reply_keyboard(bot, chat_id)
 
-    header = await bot.send_message(chat_id, texts.REG_DONE)
-    card = await profile.send_card(bot, chat_id, fresh,
-                                   markup=kb.CONFIRM_PROFILE, show_distance=False)
-    await screen.remember(state, [header.message_id, *card])
+    # Приём геопозиции подтверждаем строкой над анкетой, а не отдельным сообщением
+    header = texts.REG_DONE
+    if fresh["geo_source"] == "gps":
+        place = fresh["city"]
+        if fresh["region"] and norm_text(fresh["region"]) != norm_text(fresh["city"]):
+            place += f", {fresh['region']}"
+        header = texts.REG_GEO_SAVED.format(city=profile.esc(place)) + "\n" + header
+
+    await screen.prepare(bot, chat_id, state)
+    card = await profile.send_card(bot, chat_id, fresh, markup=kb.CONFIRM_PROFILE,
+                                   show_distance=False, header=header)
+    await screen.remember(state, card)
 
 
 # ────────────────────────────── Точки входа ─────────────────────────────────
 
-async def start(message: Message, state: FSMContext, settings: Settings) -> None:
-    await ask_gender(message.bot, message.chat.id, state)
+async def start(bot: Bot, chat_id: int, state: FSMContext) -> None:
+    await ask_gender(bot, chat_id, state)
 
 
-async def resume(message: Message, state: FSMContext, user: Mapping[str, Any],
-                 settings: Settings) -> None:
+async def resume(bot: Bot, chat_id: int, state: FSMContext, user: Mapping[str, Any],
+                 settings: Settings, first_name: str = "") -> None:
     """Продолжает анкету с первого незаполненного поля."""
-    bot, chat_id = message.bot, message.chat.id
     if not user["gender"]:
         await ask_gender(bot, chat_id, state)
     elif not user["looking_for"]:
@@ -191,8 +187,7 @@ async def resume(message: Message, state: FSMContext, user: Mapping[str, Any],
     elif not user["age"]:
         await ask_age(bot, chat_id, state)
     elif not user["name"]:
-        await ask_name(bot, chat_id, state, settings,
-                       message.from_user.first_name or "")
+        await ask_name(bot, chat_id, state, settings, first_name)
     elif not user["media_id"]:
         await ask_media(bot, chat_id, state, settings)
     elif user["about"] is None:
@@ -392,7 +387,7 @@ async def set_location(message: Message, state: FSMContext, user) -> None:
     # а восстановить адрес по лайкам нельзя
     safe_lat, safe_lon = geo.jitter(lat, lon)
     await save_city(user["id"], city, lat=safe_lat, lon=safe_lon, source="gps")
-    await ask_scope(bot, chat_id, state)
+    await geo_done(bot, chat_id, state)
 
 
 @router.message(Registration.city, F.text)
@@ -402,7 +397,7 @@ async def set_city(message: Message, state: FSMContext, user,
     await screen.drop(message)
     bot, chat_id = message.bot, message.chat.id
 
-    if query == "✍️ Ввести город вручную":
+    if query == rkb.BTN_MANUAL_CITY:
         await ask_city(bot, chat_id, state)
         return
 
@@ -411,7 +406,7 @@ async def set_city(message: Message, state: FSMContext, user,
     if len(found) == 1:
         city = found[0]
         await save_city(user["id"], city, lat=city.lat, lon=city.lon, source="city")
-        await ask_scope(bot, chat_id, state)
+        await geo_done(bot, chat_id, state)
         return
 
     if len(found) > 1:
@@ -421,6 +416,15 @@ async def set_city(message: Message, state: FSMContext, user,
         ])
         await _step(bot, chat_id, state, texts.REG_CITY_CHOICE,
                     kb.city_choices(found))
+        return
+
+    # Назвали не город, а область целиком — так и запоминаем: такой человек
+    # свой для любого города этой области
+    region = geo.find_whole_region(query)
+    if region is not None:
+        await save_city(user["id"], region, lat=region.lat, lon=region.lon,
+                        source="region")
+        await geo_done(bot, chat_id, state)
         return
 
     # Города нет в справочнике — спрашиваем область, чтобы поиск всё же работал
@@ -442,7 +446,7 @@ async def set_region_fallback(message: Message, state: FSMContext, user) -> None
     if found:
         city = found[0]
         await save_city(user["id"], city, lat=city.lat, lon=city.lon, source="city")
-        await ask_scope(bot, chat_id, state)
+        await geo_done(bot, chat_id, state)
         return
 
     anchors = geo.find_region(query)
@@ -455,12 +459,17 @@ async def set_region_fallback(message: Message, state: FSMContext, user) -> None
         )
         return
 
+    # Посёлка нет в справочнике: храним его название и центр области —
+    # искать будем по области, а земляки из того же посёлка найдут друг друга
     anchor = anchors[0]
+    place = pending if pending[:1].isupper() else pending.title()
+    if norm_text(place) == norm_text(anchor.region):
+        place = anchor.region
     await users_repo.update_user(
-        user["id"], city=pending.title(), region=anchor.region,
+        user["id"], city=place, region=anchor.region,
         country=anchor.country, lat=anchor.lat, lon=anchor.lon, geo_source="region",
     )
-    await ask_scope(bot, chat_id, state)
+    await geo_done(bot, chat_id, state)
 
 
 @router.callback_query(F.data.startswith("reg:city:"), Registration.city)
@@ -482,12 +491,13 @@ async def pick_city(call: CallbackQuery, state: FSMContext, user) -> None:
     city = geo.City(chosen["name"], chosen["region"], chosen["country"],
                     chosen["lat"], chosen["lon"])
     await save_city(user["id"], city, lat=city.lat, lon=city.lon, source="city")
-    await ask_scope(call.bot, call.message.chat.id, state)
+    await geo_done(call.bot, call.message.chat.id, state)
 
 
 @router.callback_query(F.data.startswith("reg:scope:"), Registration.scope)
 async def set_scope(call: CallbackQuery, state: FSMContext, user,
                     settings: Settings) -> None:
+    """Кнопки прежнего шага «где искать» — у кого он остался открытым."""
     scope = (call.data or "").split(":")[-1]
     if scope not in {"city", "region", "near"}:
         await call.answer()
@@ -507,13 +517,10 @@ async def confirm(call: CallbackQuery, state: FSMContext, bot: Bot, user,
                   settings: Settings, is_admin: bool) -> None:
     await users_repo.update_user(user["id"], registered=1, is_active=1)
     await call.answer("Готово!")
-    await screen.clear(bot, call.message.chat.id, state)
-    await state.clear()
-
     fresh = await users_repo.get_user(user["id"])
-    await menu_handlers.show_main_menu(
-        call.message, fresh, is_admin,
-        text="🎉 Анкета опубликована! Начинайте смотреть анкеты 👇",
+    await menu_handlers.show_menu(
+        bot, call.message.chat.id, state, fresh, is_admin,
+        note="🎉 <b>Анкета опубликована!</b> Начинайте смотреть анкеты 👇",
     )
     await admin_log(
         bot,

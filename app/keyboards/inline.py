@@ -1,8 +1,9 @@
 """Inline-клавиатуры и схема callback_data.
 
 Соглашение: <раздел>:<действие>[:<аргумент>]
-cap  — капча, onb — приветствие, reg — анкета, br — лента, pr — профиль,
-st — настройки, rep — жалоба, ver — верификация, adm — админка.
+m — главное меню, cap — капча, onb — приветствие, reg — анкета, br — лента,
+pr — профиль, edit — правка анкеты, st — настройки, rep — жалоба,
+ver — верификация, adm — админка.
 """
 from __future__ import annotations
 
@@ -16,6 +17,33 @@ def _kb(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
 
 def _btn(text: str, data: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=data)
+
+
+# ──────────────────────────── Главное меню ──────────────────────────────────
+
+def home() -> InlineKeyboardButton:
+    return _btn("🏠 В меню", "m:home")
+
+
+def main_menu(likes: int = 0, matches: int = 0, *, is_admin: bool = False,
+              is_moderator: bool = False) -> InlineKeyboardMarkup:
+    """Меню живёт в самом сообщении — под полем ввода кнопок больше нет."""
+    rows = [
+        [_btn("🔍 Смотреть анкеты", "m:search")],
+        [_btn(f"❤️ Кто лайкнул ({likes})" if likes else "❤️ Кто лайкнул", "m:likes"),
+         _btn(f"💬 Пары ({matches})" if matches else "💬 Пары", "m:matches")],
+        [_btn("👤 Моя анкета", "m:profile"), _btn("⚙️ Настройки", "m:settings")],
+        [_btn("ℹ️ Помощь", "m:help")],
+    ]
+    if is_admin:
+        rows.append([_btn("🛠 Админ-панель", "m:admin")])
+    elif is_moderator:
+        rows.append([_btn("👮 Модератор", "m:admin")])
+    return _kb(rows)
+
+
+BACK_HOME = _kb([[home()]])
+START_OVER = _kb([[_btn("📝 Заполнить анкету", "m:start")]])
 
 
 # ──────────────────────────────── Капча ─────────────────────────────────────
@@ -68,16 +96,6 @@ def city_choices(cities, prefix: str = "reg") -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def scope(city: str, region: str, has_coords: bool,
-          prefix: str = "reg") -> InlineKeyboardMarkup:
-    rows = [[_btn(f"🏙 Только {city}", f"{prefix}:scope:city")]]
-    if region and region != city:
-        rows.append([_btn(f"🗺 Вся {region}", f"{prefix}:scope:region")])
-    if has_coords:
-        rows.append([_btn("📍 По расстоянию (рядом со мной)", f"{prefix}:scope:near")])
-    return _kb(rows)
-
-
 CONFIRM_PROFILE = _kb([
     [_btn("✅ Всё верно, поехали", "reg:confirm")],
     [_btn("✏️ Заполнить заново", "reg:restart")],
@@ -92,8 +110,21 @@ def browse(target_id: int, likes_left: int | None = None) -> InlineKeyboardMarku
         [_btn(heart, f"br:like:{target_id}"),
          _btn("💌 С сообщением", f"br:note:{target_id}"),
          _btn("👎", f"br:dislike:{target_id}")],
-        [_btn("🚨 Пожаловаться", f"br:report:{target_id}"), _btn("💤 В меню", "br:stop")],
+        [_btn("🚨 Пожаловаться", f"br:report:{target_id}"), _btn("🏠 В меню", "br:stop")],
     ])
+
+
+def feed_end(skipped: int) -> InlineKeyboardMarkup:
+    """Лента закончилась: вернуть пропущенных, расширить поиск или в меню."""
+    rows = []
+    if skipped:
+        rows.append([_btn(f"🔄 Вернуть пропущенных ({skipped})", "br:reset")])
+    rows.append([_btn("⚙️ Настройки поиска", "m:settings")])
+    rows.append([home()])
+    return _kb(rows)
+
+
+LIKES_END = _kb([[_btn("🔍 Смотреть анкеты", "m:search")], [home()]])
 
 
 def answer_like(sender_id: int) -> InlineKeyboardMarkup:
@@ -128,8 +159,9 @@ def profile_actions(is_active: bool, verify_status: str) -> InlineKeyboardMarkup
         else _btn("👀 Показывать в поиске", "pr:show")
     ])
     if verify_status not in {"verified", "pending"}:
-        rows.append([_btn("☑️ Пройти верификацию", "pr:verify")])
+        rows.append([_btn("✅ Пройти верификацию", "pr:verify")])
     rows.append([_btn("🗑 Удалить анкету", "pr:delete")])
+    rows.append([home()])
     return _kb(rows)
 
 
@@ -139,6 +171,8 @@ EDIT_FIELDS = _kb([
     [_btn("🌍 Город / геопозиция", "edit:city")],
     [_btn("⬅️ Назад", "edit:back")],
 ])
+EDIT_CANCEL = _kb([[_btn("⬅️ Отмена", "edit:back")]])
+PROFILE_BACK = _kb([[_btn("⬅️ К анкете", "edit:back")]])
 
 DELETE_CONFIRM = _kb([
     [_btn("🗑 Да, удалить", "pr:delete_yes")],
@@ -148,25 +182,32 @@ DELETE_CONFIRM = _kb([
 
 # ────────────────────────────── Настройки ───────────────────────────────────
 
+# С чего начинается лента. Дальше она всё равно идёт к соседним городам.
+SCOPE_BUTTONS = (
+    ("city", "Сначала мой город"),
+    ("region", "Сначала вся область"),
+    ("near", "Сначала те, кто рядом"),
+)
+
+
 def settings(scope_value: str, has_coords: bool,
              notify_enabled: bool = True) -> InlineKeyboardMarkup:
-    rows = [
-        [_btn("🎂 Возраст поиска", "st:age")],
-        [_btn("🌍 Город / геопозиция", "st:city")],
-        [_btn("🏙 Искать: только город", "st:scope:city")],
-        [_btn("🗺 Искать: вся область", "st:scope:region")],
-    ]
-    if has_coords:
-        rows.append([_btn("📍 Искать: по расстоянию", "st:scope:near")])
-        if scope_value == "near":
-            rows.append([_btn("📏 Радиус поиска", "st:radius")])
+    rows = [[_btn("🎂 Возраст поиска", "st:age"), _btn("🌍 Город", "st:city")]]
+    for key, title in SCOPE_BUTTONS:
+        mark = "🔘" if key == scope_value else "⚪️"
+        rows.append([_btn(f"{mark} {title}", f"st:scope:{key}")])
+    if has_coords and scope_value == "near":
+        rows.append([_btn("📏 Радиус", "st:radius")])
     rows.append([_btn("🔄 Вернуть пропущенные анкеты", "st:reset_skips")])
     rows.append([_btn(
         "🔔 Напоминания: включены" if notify_enabled else "🔕 Напоминания: выключены",
         "st:notify",
     )])
-    rows.append([_btn("⬅️ В меню", "st:close")])
+    rows.append([_btn("🏠 В меню", "st:close")])
     return _kb(rows)
+
+
+SETTINGS_BACK = _kb([[_btn("⬅️ Назад", "st:back")]])
 
 
 def radius_choices() -> InlineKeyboardMarkup:
@@ -194,8 +235,13 @@ REPORT_SKIP_COMMENT = _kb([[_btn("📨 Отправить без коммент�
 
 # ───────────────────────────── Верификация ──────────────────────────────────
 
-VERIFY_START = _kb([[_btn("☑️ Пройти верификацию", "ver:start")]])
+VERIFY_START = _kb([[_btn("✅ Пройти верификацию", "ver:start")]])
 VERIFY_CANCEL = _kb([[_btn("⬅️ Отмена", "ver:cancel")]])
+# Проверку попросил сам человек из своей анкеты — туда же и возвращаем
+VERIFY_SELF = _kb([
+    [_btn("📸 Отправить фото с кодом", "ver:start")],
+    [_btn("⬅️ К анкете", "edit:back")],
+])
 
 
 def verify_review(verification_id: int) -> InlineKeyboardMarkup:
@@ -212,7 +258,7 @@ def admin_menu(reports_open: int = 0, verify_wait: int = 0,
                is_admin: bool = True) -> InlineKeyboardMarkup:
     """Полная панель владельцу, урезанная — модератору."""
     reports = f"🚨 Жалобы ({reports_open})" if reports_open else "🚨 Жалобы"
-    verify = f"☑️ Верификация ({verify_wait})" if verify_wait else "☑️ Верификация"
+    verify = f"✅ Верификация ({verify_wait})" if verify_wait else "✅ Верификация"
 
     rows = [
         [_btn(reports, "adm:reports"), _btn(verify, "adm:verify")],
@@ -255,7 +301,7 @@ def admin_user_card(user_id: int, is_banned: bool, verified: bool,
         else _btn("🚫 Забанить", f"adm:ban_id:{user_id}")
     ])
     if not verified:
-        rows.append([_btn("☑️ Запросить верификацию", f"adm:req_verify:{user_id}")])
+        rows.append([_btn("✅ Запросить верификацию", f"adm:req_verify:{user_id}")])
     if forced:
         rows.append([_btn("🔓 Снять требование верификации", f"adm:drop_verify:{user_id}")])
     if verified:
@@ -310,7 +356,7 @@ BROADCAST_CONFIRM = _kb([
 def report_actions(report_id: int, target_id: int) -> InlineKeyboardMarkup:
     return _kb([
         [_btn("🚫 Забанить", f"rp:ban:{report_id}"),
-         _btn("☑️ Запросить верификацию", f"rp:verify:{report_id}")],
+         _btn("✅ Запросить верификацию", f"rp:verify:{report_id}")],
         [_btn("👤 Карточка", f"adm:card:{target_id}"),
          _btn("✅ Отклонить жалобу", f"rp:skip:{report_id}")],
     ])

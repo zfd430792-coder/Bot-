@@ -9,10 +9,13 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import InlineKeyboardMarkup, Message
 
+from app.db.database import norm_text
 from app.services import geo
+from app.texts import VERIFY_BADGE
 
 log = logging.getLogger(__name__)
 
+CAPTION_LIMIT = 1024      # подпись к фото и видео в Telegram
 GENDER_EMOJI = {"m": "👨", "f": "👩"}
 GENDER_WORD = {"m": "парень", "f": "девушка"}
 LOOKING_WORD = {"m": "парней", "f": "девушек", "any": "всех"}
@@ -36,29 +39,51 @@ def esc(text: str | None) -> str:
     return html.escape(text or "", quote=False)
 
 
+def _distance_line(user: Mapping[str, Any], viewer: Mapping[str, Any]) -> str:
+    """Расстояние показываем, когда оно что-то говорит.
+
+    Ищет «рядом» — всегда. Иначе — только если человек из другого места:
+    лента доходит и до соседних городов, и «~70 км от вас» объясняет, почему
+    анкета здесь. Для своего города расстояние между центрами — ноль, его
+    не пишем.
+    """
+    km = user["distance"] if "distance" in user.keys() else None
+    if km is None:
+        return ""
+    same_place = norm_text(user["city"]) == norm_text(viewer["city"])
+    if viewer["search_scope"] == "near" or (not same_place and km >= 5):
+        return f"\n🚶 {geo.distance_text(km)}"
+    return ""
+
+
 def render_card(user: Mapping[str, Any], *, viewer: Mapping[str, Any] | None = None,
                 show_distance: bool = True, admin_view: bool = False,
-                note: str | None = None) -> str:
+                note: str | None = None, header: str = "",
+                about_limit: int | None = None) -> str:
     """Текст карточки. Координаты не раскрываются — только расстояние."""
-    verified = " ☑️" if user["verify_status"] == "verified" else ""
+    verified = f" {VERIFY_BADGE}" if user["verify_status"] == "verified" else ""
     gender = GENDER_EMOJI.get(user["gender"], "")
     head = f"{gender} <b>{esc(user['name'])}</b>, {years(user['age'])}{verified}"
 
     place = ""
     if user["city"]:
         place = f"\n📍 {esc(user['city'])}"
-        if user["region"] and user["region"] != user["city"]:
+        # Без учёта регистра: прежняя версия могла записать «Самарская Область»
+        if user["region"] and norm_text(user["region"]) != norm_text(user["city"]):
             place += f", {esc(user['region'])}"
 
     distance = ""
-    if show_distance:
-        km = user["distance"] if "distance" in user.keys() else None
-        if km is not None and viewer is not None and viewer["search_scope"] == "near":
-            distance = f"\n🚶 {geo.distance_text(km)}"
+    if show_distance and viewer is not None:
+        distance = _distance_line(user, viewer)
 
-    about = f"\n\n{esc(user['about'])}" if user["about"] else ""
+    about_text = user["about"] or ""
+    if about_limit is not None and len(about_text) > about_limit:
+        about_text = about_text[:max(0, about_limit - 1)].rstrip() + "…"
+    about = f"\n\n{esc(about_text)}" if about_text else ""
 
     card = head + place + distance + about
+    if header:
+        card = f"{header}\n\n{card}"
 
     # Сообщение, приложенное к лайку, — главное в карточке, выделяем его
     if note is None and "like_note" in user.keys():
@@ -85,11 +110,20 @@ async def send_card(bot: Bot, chat_id: int, user: Mapping[str, Any], *,
                     viewer: Mapping[str, Any] | None = None,
                     show_distance: bool = True,
                     admin_view: bool = False,
-                    note: str | None = None) -> list[int]:
+                    note: str | None = None,
+                    header: str = "") -> list[int]:
     """Отправляет анкету. Возвращает id сообщений (их потом нужно удалить)."""
-    caption = render_card(user, viewer=viewer, show_distance=show_distance,
-                          admin_view=admin_view, note=note)
+    options = dict(viewer=viewer, show_distance=show_distance,
+                   admin_view=admin_view, note=note, header=header)
+    caption = render_card(user, **options)
     media_type, media_id = user["media_type"], user["media_id"]
+    # Подпись к фото короче обычного сообщения: лишнее срезаем с «о себе»,
+    # иначе Telegram отверг бы анкету целиком
+    overflow = len(caption) - CAPTION_LIMIT
+    if media_type in ("photo", "video") and overflow > 0:
+        about_len = len(user["about"] or "")
+        caption = render_card(user, about_limit=max(0, about_len - overflow - 1),
+                              **options)
     sent: list[Message] = []
 
     try:

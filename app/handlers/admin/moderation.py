@@ -206,11 +206,11 @@ async def request_verify(call: CallbackQuery, bot: Bot) -> None:
         return
     await call.answer("Запрос отправлен")
     await call.message.answer(
-        f"☑️ Пользователю <code>{target_id}</code> отправлено требование "
+        f"✅ Пользователю <code>{target_id}</code> отправлено требование "
         f"верификации.\nКод на фото: <code>{code}</code>\n\n"
         "До подтверждения бот для него закрыт, анкета скрыта из поиска."
     )
-    await admin_log(bot, f"☑️ Запрошена верификация: <code>{target_id}</code> "
+    await admin_log(bot, f"✅ Запрошена верификация: <code>{target_id}</code> "
                          f"(админ <code>{call.from_user.id}</code>)")
 
 
@@ -231,7 +231,7 @@ async def verify_command(message: Message, bot: Bot) -> None:
         await message.answer("Это владелец бота — проверки на него не действуют.")
         return
     await message.answer(
-        f"☑️ Требование отправлено. Код: <code>{code}</code>\n"
+        f"✅ Требование отправлено. Код: <code>{code}</code>\n"
         "Пока пользователь не пройдёт проверку, бот для него закрыт."
     )
 
@@ -265,16 +265,16 @@ async def list_verifications(call: CallbackQuery, bot: Bot) -> None:
     await call.answer()
     rows = await mod_repo.pending_verifications()
     if not rows:
-        await call.message.edit_text("☑️ Заявок на верификацию нет.",
+        await call.message.edit_text("✅ Заявок на верификацию нет.",
                                      reply_markup=kb.ADMIN_BACK)
         return
     await call.message.edit_text(
-        f"☑️ Заявок на проверку: <b>{len(rows)}</b>. Показываю по одной.",
+        f"✅ Заявок на проверку: <b>{len(rows)}</b>. Показываю по одной.",
         reply_markup=kb.ADMIN_BACK,
     )
     for row in rows[:10]:
         header = (
-            f"☑️ Заявка #{row['id']}\n"
+            f"✅ Заявка #{row['id']}\n"
             f"<b>{profile_service.esc(row['name'] or '—')}</b> "
             f"<code>{row['user_id']}</code> @{row['username'] or '—'}\n"
             f"Код должен быть: <code>{row['code']}</code>"
@@ -314,7 +314,7 @@ async def approve_verification(call: CallbackQuery, bot: Bot) -> None:
     except Exception:
         pass
     await call.message.answer(f"✅ Верификация #{verification_id} подтверждена.")
-    await admin_log(bot, f"☑️ Верификация подтверждена: <code>{record['user_id']}</code> "
+    await admin_log(bot, f"✅ Верификация подтверждена: <code>{record['user_id']}</code> "
                          f"(админ <code>{call.from_user.id}</code>)")
 
 
@@ -426,7 +426,7 @@ async def report_request_verify(call: CallbackQuery, bot: Bot) -> None:
     await mod_repo.close_report(report_id, call.from_user.id, "done")
     await call.answer("Верификация запрошена")
     await call.message.answer(
-        f"☑️ По жалобе #{report_id} запрошена верификация "
+        f"✅ По жалобе #{report_id} запрошена верификация "
         f"<code>{record['target_id']}</code>. Код: <code>{code}</code>"
     )
 
