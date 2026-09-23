@@ -5,10 +5,12 @@
 * администратор требует проверку — бот закрыт до подтверждения (см. gates.py).
 
 Проверка — кружок: его записывают прямо с камеры, поэтому чужое фото или
-старое видео не подсунуть. В кружке человек называет вслух код и делает одно
-действие. И то и другое бот выбирает случайно в момент, когда человек садится
-записывать, и задание живёт TASK_MINUTES минут. Принимается только кружок —
-не фото, не обычное видео и не пересланный.
+старое видео не подсунуть. В кружке человек показывает листок, где написан
+код, а под ним @ник бота, читает код вслух и делает одно действие. Код и
+действие бот выбирает случайно в момент, когда человек садится записывать, и
+задание живёт TASK_MINUTES минут. Ник бота на листке не даёт выдать за
+проверку готовый кружок из чужого канала. Принимается только кружок — не
+фото, не обычное видео и не пересланный.
 
 Если администратор загрузил кружок-пример («⚙️ Настройки бота»), он стоит
 над заданием. Заявки администратор разбирает в админке («✅ Верификация»),
@@ -40,34 +42,39 @@ from app.states import Verification
 router = Router(name="verification")
 
 TASK_MINUTES = 10       # столько живёт задание: записанный заранее кружок не подойдёт
-MIN_SECONDS = 3         # короче не успеть назвать код и сделать действие
+MIN_SECONDS = 3         # короче не успеть показать листок, назвать код и сделать действие
 MAX_SECONDS = 20
-# Код, который называют в кружке-примере. Настоящим он не выдаётся — иначе
-# проверку прошёл бы сам пример
+# Код из кружка-примера. Настоящим он не выдаётся — иначе проверку прошёл бы
+# сам пример
 EXAMPLE_CODE = "1234"
 SEND_TEXT = "📸 Отправить фото с кодом"      # нижняя кнопка прежней версии
 
 
 def new_code() -> str:
-    """Четыре цифры — их проще всего назвать вслух."""
+    """Четыре цифры — их легко написать разборчиво и назвать вслух."""
     while True:
         code = "".join(secrets.choice("0123456789") for _ in range(4))
         if code != EXAMPLE_CODE:
             return code
 
 
-def spoken(code: str) -> str:
-    """«4729» -> «4 7 2 9»: код называют по цифрам."""
-    return " ".join(code)
+async def bot_name(bot: Bot) -> str:
+    """@ник бота — его пишут на листке под кодом."""
+    return f"@{(await bot.me()).username}"
 
 
-def task_summary(record: Mapping[str, Any]) -> str:
-    """Что должно быть в кружке — строка для администратора."""
+def task_summary(record: Mapping[str, Any], bot_nick: str) -> str:
+    """Что должно быть в кружке — чек-лист для администратора."""
     if not record["action"]:
         # Заявка прежней версии: фото с кодом на листе бумаги
         return f"Код на фото должен быть: <code>{record['code']}</code>"
     action = texts.VERIFY_ACTIONS.get(record["action"], record["action"])
-    return f"Задание: код <b>{spoken(record['code'])}</b> вслух, затем «{action}»"
+    return (
+        "В кружке должно быть:\n"
+        f"• листок: <b>{record['code']}</b>, под ним <b>{bot_nick}</b>\n"
+        f"• код вслух: <b>{record['code']}</b>\n"
+        f"• действие: {action}"
+    )
 
 
 async def request_verification(bot: Bot, user_id: int, *, forced: bool,
@@ -150,7 +157,8 @@ async def _show_task(bot: Bot, chat_id: int, state: FSMContext,
     record = await _task(user)
     await state.set_state(Verification.waiting_media)
     text = texts.VERIFY_TASK.format(
-        code=spoken(record["code"]),
+        code=record["code"],
+        bot=await bot_name(bot),
         action=texts.VERIFY_ACTIONS.get(record["action"], record["action"]),
         minutes=TASK_MINUTES,
     )
@@ -165,7 +173,7 @@ async def _show_task(bot: Bot, chat_id: int, state: FSMContext,
     ids: list[int] = []
     try:
         ids.append((await bot.send_video_note(chat_id, example)).message_id)
-        text = f"{texts.VERIFY_EXAMPLE_NOTE.format(code=spoken(EXAMPLE_CODE))}\n\n{text}"
+        text = f"{texts.VERIFY_EXAMPLE_NOTE.format(code=EXAMPLE_CODE)}\n\n{text}"
     except TelegramBadRequest:
         pass    # файл примера недоступен — задание важнее, покажем его без примера
     if notice:
@@ -267,8 +275,8 @@ async def receive_media(message: Message, state: FSMContext, bot: Bot,
         "✅ <b>Заявка на верификацию</b>\n\n"
         f"Пользователь: <b>{profile_service.esc(fresh['name'] or fresh['tg_name'])}</b>\n"
         f"<code>{fresh['id']}</code> @{fresh['username'] or '—'}\n"
-        f"{task_summary(record)}\n"
-        f"Тип заявки: {'запрошена админом' if record['forced'] else 'по своей инициативе'}"
+        f"Тип заявки: {'запрошена админом' if record['forced'] else 'по своей инициативе'}\n\n"
+        f"{task_summary(record, await bot_name(bot))}"
     )
     for admin_id in settings.admin_ids:
         try:

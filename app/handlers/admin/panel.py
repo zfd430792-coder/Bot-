@@ -58,8 +58,9 @@ EXAMPLE_ASK = (
     "🎥 <b>Пример верификации</b>\n\n"
     "Пришлите кружок — его увидит каждый, кто проходит проверку, прямо над "
     "своим заданием. Можно переслать кружок из другого чата.\n\n"
-    "<b>Что в нём должно быть</b> (5–7 секунд):\n"
-    "<blockquote>Лицо хорошо видно, человек говорит: «Мой код — {code}» — и "
+    "<b>Что в нём должно быть</b> (5–10 секунд):\n"
+    "<blockquote>Лицо хорошо видно, в руке листок: сверху код {code}, под ним "
+    "{bot}. Человек держит листок в кадре, говорит: «Мой код — {code}» — и "
     "показывает три пальца.</blockquote>\n"
     "Код {code} настоящим никому не выдаётся, так что сам пример проверку не пройдёт."
 )
@@ -391,8 +392,8 @@ async def show_example(bot: Bot, chat_id: int, state: FSMContext,
     """Экран примера: сам кружок, если загружен, и что в нём должно быть."""
     await state.set_state(AdminPanel.verify_example)
     example = await mod_repo.verify_example()
-    text = EXAMPLE_ASK.format(
-        code=verification_handlers.spoken(verification_handlers.EXAMPLE_CODE))
+    text = EXAMPLE_ASK.format(code=verification_handlers.EXAMPLE_CODE,
+                              bot=await verification_handlers.bot_name(bot))
     if error:
         text = f"⚠️ {error}\n\n{text}"
     markup = kb.verify_example(bool(example))

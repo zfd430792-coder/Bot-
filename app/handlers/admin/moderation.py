@@ -188,15 +188,17 @@ async def show_verification(bot: Bot, chat_id: int, state: FSMContext, is_admin:
     row = rows[0]
     await state.set_state(AdminPanel.verify_view)
     await state.update_data(verify_skip=sorted(skipped))
+    checklist = verification_handlers.task_summary(
+        row, await verification_handlers.bot_name(bot))
+    hint = ("☝️ Сверьте лицо в анкете и в кружке, листок, код и действие." if row["action"]
+            else "☝️ Сверьте лицо в анкете и на фото проверки, код на листе.")
     caption = (
         (f"{notice}\n\n" if notice else "")
         + f"✅ <b>Заявка #{row['id']}</b> · осталось: {len(rows)}\n"
         f"<b>{profile_service.esc(row['name'] or '—')}</b> "
         f"<code>{row['user_id']}</code> @{row['username'] or '—'}\n"
-        f"{verification_handlers.task_summary(row)}\n"
         f"Тип: {'запрошена админом' if row['forced'] else 'по своей инициативе'}\n\n"
-        + ("☝️ Сверьте лицо в анкете и в кружке, код и действие." if row["action"]
-           else "☝️ Сверьте лицо в анкете и на фото проверки, код на листе.")
+        f"{checklist}\n\n{hint}"
     )
     markup = kb.verify_view(int(row["id"]))
     await screen.prepare(bot, chat_id, state)

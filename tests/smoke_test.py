@@ -564,7 +564,8 @@ async def scenarios(h: "Harness", settings, storage) -> int:
 
     await h.click(CAROL, "m:search")
     check(h.said("Требуется верификация"), "до проверки бот закрыт")
-    check(h.said("кружок"), "пользователю объяснено, что нужен кружок")
+    check(h.said("кружок") and h.said("приготовьте листок и ручку"),
+          "пользователю объяснено: нужен кружок и листок")
     check(h.data(CAROL) == ["ver:send"], "записать кружок — кнопкой")
     h.clear()
 
@@ -576,11 +577,12 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     await h.click(CAROL, "ver:send")
     task = await mod_repo.current_verification(CAROL)
     code = task["code"]
-    check(len(code) == 4 and code.isdigit(), "код — четыре цифры: их легко назвать вслух")
+    check(len(code) == 4 and code.isdigit(), "код — четыре цифры: их легко написать и назвать")
     check(task["action"] in texts.VERIFY_ACTIONS, "к коду выдано случайное действие")
-    check(h.said(f"<b>{' '.join(code)}</b>")
-          and h.said(texts.VERIFY_ACTIONS[task["action"]]),
-          "на экране задание: код и действие")
+    check(h.said(f"код <b>{code}</b>, а под ним — ник бота <b>@test_bot</b>"),
+          "на листке — код, а под ним ник бота")
+    check(h.said("прочитайте код вслух") and h.said(texts.VERIFY_ACTIONS[task["action"]]),
+          "в кружке — листок, код вслух и действие")
     check(h.said("10 минут"), "сказано, сколько действует задание")
     check(not h.session.of_type("SendVideoNote"), "пример не загружен — задание без него")
     h.clear()
@@ -613,7 +615,7 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     check(not await mod_repo.awaiting_review(CAROL), "просроченный кружок админу не ушёл")
     task = await mod_repo.current_verification(CAROL)
     check(task["task_age"] is not None and task["task_age"] < 60, "выдано новое задание")
-    check(h.said(f"<b>{' '.join(task['code'])}</b>"), "новый код на экране")
+    check(h.said(f"<b>{task['code']}</b>"), "новый код на экране")
     h.clear()
 
     await h.feed(video_note_update(h.bot, CAROL, 6))
@@ -624,13 +626,17 @@ async def scenarios(h: "Harness", settings, storage) -> int:
           "админу пришла заявка с кнопкой «Проверить»")
     check(any(type(c).__name__ == "SendVideoNote" for c in h.to(ADMIN)),
           "админу пришёл сам кружок")
+    check(any(f"листок: <b>{task['code']}</b>, под ним <b>@test_bot</b>"
+              in (getattr(c, "text", None) or "") for c in h.to(ADMIN)),
+          "в уведомлении — что должно быть в кружке")
     h.clear()
 
     await h.click(ADMIN, "adm:verify", username="boss")
     check(h.said("Заявка #") and h.said("Карина"), "заявка открывается вместе с анкетой")
-    check(h.said(f"код <b>{' '.join(task['code'])}</b> вслух")
+    check(h.said(f"листок: <b>{task['code']}</b>, под ним <b>@test_bot</b>")
+          and h.said(f"код вслух: <b>{task['code']}</b>")
           and h.said(texts.VERIFY_ACTIONS[task["action"]]),
-          "админ видит, что должно быть в кружке")
+          "админ видит чек-лист: листок с ником бота, код вслух, действие")
     names = h.session.method_names()
     check("SendPhoto" in names and "SendVideoNote" in names
           and names.index("SendPhoto") < names.index("SendVideoNote"),
@@ -1556,7 +1562,7 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     verification_handlers.secrets.choice = lambda seq: next(digits)
     try:
         check(verification_handlers.new_code() == "5678",
-              "код из примера (1 2 3 4) настоящим не выдаётся")
+              "код из примера (1234) настоящим не выдаётся")
     finally:
         verification_handlers.secrets.choice = choice
 
@@ -1565,7 +1571,8 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     await h.click(ADMIN, "adm:config", username="boss")
     check("adm:cfg:example" in h.data(ADMIN), "в настройках есть пример верификации")
     await h.click(ADMIN, "adm:cfg:example", username="boss")
-    check(h.said("Мой код — 1 2 3 4"), "владельцу подсказано, что снять в примере")
+    check(h.said("Мой код — 1234") and h.said("сверху код 1234, под ним @test_bot"),
+          "владельцу подсказано, что снять в примере: листок с ником бота")
     await h.feed(photo_update(h.bot, ADMIN, username="boss"))
     check(h.said("Нужен именно кружок"), "пример — только кружок")
     await h.feed(video_note_update(h.bot, ADMIN, 6, forwarded=True,
@@ -1586,7 +1593,7 @@ async def scenarios(h: "Harness", settings, storage) -> int:
           "над заданием — кружок-пример")
     check(h.session.last("SendVideoNote").video_note == "example-circle",
           "показан загруженный пример")
-    check(h.said("Код в нём 1 2 3 4, у вас будет свой"), "под примером — что код у всех свой")
+    check(h.said("Код в нём 1234, у вас будет свой"), "под примером — что код у всех свой")
     h.clear()
     await h.click(VERA, "ver:cancel")
     check("ver:self" in h.data(VERA), "после отмены кнопка «Пройти верификацию» на месте")
@@ -1609,8 +1616,9 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     await h.click(ADMIN, "adm:verify", username="boss")
     record = await mod_repo.current_verification(VERA)
     await h.act(ADMIN, "adm:ver:no:", username="boss")
-    check(f"adm:vrj:person:{record['id']}" in h.data(ADMIN),
-          "готовые причины отказа — кнопками")
+    check(f"adm:vrj:person:{record['id']}" in h.data(ADMIN)
+          and f"adm:vrj:paper:{record['id']}" in h.data(ADMIN),
+          "готовые причины отказа — кнопками, есть и про листок")
     await h.click(ADMIN, f"adm:vrj:person:{record['id']}", username="boss")
     record = await mod_repo.get_verification(record["id"])
     reason = texts.VERIFY_REJECT_REASONS["person"][1]
