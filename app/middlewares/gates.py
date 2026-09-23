@@ -16,13 +16,16 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from app import texts
+from app.keyboards import inline as kb
 from app.keyboards import reply as rkb
 from app.services import screen
 from app.services.notify import appeal_contact
 from app.states import Onboarding, Verification
 
 # Нажатия, которые пропускаем мимо проверок — иначе из блокировки не выбраться
-VERIFY_TEXTS = {rkb.VERIFY_SEND, rkb.CANCEL}
+USERNAME_PASS = {"onb:username", rkb.L_USERNAME_DONE}
+CAPTCHA_PASS = {"m:start"}
+VERIFY_PASS = {"ver:send", "ver:cancel", "📸 Отправить фото с кодом", rkb.CANCEL}
 
 
 async def _reply(event: TelegramObject, data: dict[str, Any], text: str,
@@ -37,9 +40,9 @@ async def _reply(event: TelegramObject, data: dict[str, Any], text: str,
     if not isinstance(message, Message):
         return
     if state is not None:
-        await screen.send(message.bot, message.chat.id, state, text, markup)
+        await screen.show(message.bot, message.chat.id, state, text, markup)
     else:
-        await message.answer(text, reply_markup=markup)
+        await message.bot.send_message(message.chat.id, text, reply_markup=markup)
 
 
 class AccessGateMiddleware(BaseMiddleware):
@@ -56,7 +59,13 @@ class AccessGateMiddleware(BaseMiddleware):
         if user is None or data.get("is_admin"):
             return await handler(event, data)
 
-        text = event.text or "" if isinstance(event, Message) else ""
+        # Что нажато: текст сообщения или данные inline-кнопки
+        if isinstance(event, Message):
+            action = event.text or ""
+        elif isinstance(event, CallbackQuery):
+            action = event.data or ""
+        else:
+            action = ""
         state: FSMContext | None = data.get("state")
         current = await state.get_state() if state else None
 
@@ -67,34 +76,35 @@ class AccessGateMiddleware(BaseMiddleware):
                 until = f"\n<b>Действует до:</b> {user['banned_until']} (UTC)"
             await _reply(event, data, texts.BANNED.format(
                 reason=user["ban_reason"] or "нарушение правил", until=until,
-                contact=await appeal_contact()), rkb.REMOVE)
+                contact=await appeal_contact()))
             return None
 
         # 2. Без username знакомство не состоится — писать друг другу нечем
         if not user["username"]:
-            if text == rkb.USERNAME_DONE:
+            if action in USERNAME_PASS:
                 return await handler(event, data)
-            await _reply(event, data, texts.NEED_USERNAME, rkb.USERNAME_CHECK)
+            await _reply(event, data, texts.NEED_USERNAME, kb.USERNAME_CHECK)
             return None
 
         # 3. Капчу сбросила антинакрутка — пока не пройдена, дальше не пускаем
         if user["registered"] and not user["captcha_passed"]:
-            if text.startswith("/start") or current == Onboarding.captcha.state:
+            if (action.startswith("/start") or action in CAPTCHA_PASS
+                    or current == Onboarding.captcha.state):
                 return await handler(event, data)
-            await _reply(event, data, texts.CAPTCHA_RECHECK, rkb.RECHECK)
+            await _reply(event, data, texts.CAPTCHA_RECHECK, kb.RETRY)
             return None
 
         # 4. Принудительная верификация: бот закрыт, пока админ не подтвердит
         if user["verify_forced"] and user["verify_status"] != "verified":
-            if text in VERIFY_TEXTS or current == Verification.waiting_media.state:
+            if action in VERIFY_PASS or current == Verification.waiting_media.state:
                 return await handler(event, data)
             if user["verify_status"] == "pending":
-                await _reply(event, data, texts.VERIFY_PENDING, rkb.REMOVE)
+                await _reply(event, data, texts.VERIFY_PENDING)
             else:
                 await _reply(
                     event, data,
                     texts.VERIFY_REQUIRED.format(code=user["verify_code"] or "—"),
-                    rkb.VERIFY_REQUIRED,
+                    kb.VERIFY_REQUIRED,
                 )
             return None
 

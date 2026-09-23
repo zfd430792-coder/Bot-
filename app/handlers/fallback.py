@@ -19,8 +19,8 @@ router = Router(name="fallback")
 @router.callback_query()
 async def stale_callback(call: CallbackQuery, state: FSMContext, user: Mapping[str, Any],
                          settings: Settings, is_admin: bool) -> None:
-    """Кнопка под сообщением из прежней версии бота: теперь управление —
-    нижними кнопками, поэтому просто показываем актуальный экран."""
+    """Кнопка, которую бот уже не знает (из прежней версии или от
+    экрана, которого больше нет): просто показываем актуальный экран."""
     await call.answer()
     if call.message is not None:
         await onboarding.begin(call.bot, call.message.chat.id, state, user, settings,

@@ -8,7 +8,7 @@ from aiogram import Bot
 from aiogram.exceptions import (
     TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter,
 )
-from aiogram.types import ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 from app import texts
 from app.config import get_settings
@@ -16,7 +16,7 @@ from app.db import moderation as mod_repo
 
 log = logging.getLogger(__name__)
 
-Markup = ReplyKeyboardMarkup | ReplyKeyboardRemove | None
+Markup = InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove | None
 
 
 async def appeal_contact() -> str:

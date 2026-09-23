@@ -11,8 +11,8 @@
 2. Номера клеток нарисованы **вектором** (семисегментные цифры), поэтому
    капча не зависит от шрифтов в системе и не похожа ни на один датасет.
 3. Номера **перемешаны**: кнопка «7» — это не седьмая клетка, а та, на которой
-   нарисована семёрка. Кнопки всегда одни и те же (1–15), их порядок ничего
-   не подсказывает.
+   нарисована семёрка. В callback_data кнопок — случайные токены, так что и
+   номера в них нет: соответствие живёт только на сервере.
 4. Нужно выбрать **все** подходящие клетки и ни одной лишней: перебор даёт
    шанс ~1/455 (при 3 верных из 15), «выбрать всё» не работает.
 5. Учитывается время: мгновенный ответ — признак скрипта, долгий — протухание.
@@ -23,6 +23,7 @@ from __future__ import annotations
 import io
 import math
 import random
+import secrets
 import time
 from dataclasses import dataclass, field
 
@@ -183,8 +184,14 @@ def _jitter(points: list[tuple[float, float]], amount: float) -> list[tuple[floa
 class Challenge:
     task: str
     correct: list[int]            # номера клеток (те, что нарисованы), а не позиции
+    tokens: dict[str, int]        # случайный токен кнопки -> номер клетки
     image: bytes
     created_at: float = field(default_factory=time.monotonic)
+
+    @property
+    def buttons(self) -> list[tuple[str, int]]:
+        """Кнопки по возрастанию номера — порядок клеток он не выдаёт."""
+        return sorted(self.tokens.items(), key=lambda kv: kv[1])
 
 
 def _background(width: int, height: int) -> Image.Image:
@@ -349,7 +356,10 @@ def generate() -> Challenge:
     img.convert("RGB").save(buf, format="PNG", optimize=True)
 
     task = f"<b>все {COLORS[target_color][0]} {SHAPES[target_shape]}</b>"
-    return Challenge(task=task, correct=sorted(correct), image=buf.getvalue())
+    # Токены случайны: по callback_data кнопки не угадать ни номер, ни ответ
+    tokens = {secrets.token_hex(5): label for label in labels}
+    return Challenge(task=task, correct=sorted(correct), tokens=tokens,
+                     image=buf.getvalue())
 
 
 def check(correct: list[int], selected: list[int]) -> bool:

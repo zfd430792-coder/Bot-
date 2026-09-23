@@ -46,6 +46,16 @@ async def get_user(user_id: int) -> aiosqlite.Row | None:
     return await db.fetchone("SELECT * FROM users WHERE id = ?", (user_id,))
 
 
+def just_created(user: Mapping[str, Any], seconds: int = 600) -> bool:
+    """Запись появилась только что — человек у нас впервые."""
+    try:
+        created = dt.datetime.strptime(str(user["created_at"]), "%Y-%m-%d %H:%M:%S")
+    except (KeyError, TypeError, ValueError):
+        return False
+    now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)   # SQLite хранит UTC
+    return (now - created).total_seconds() < seconds
+
+
 async def get_by_username(username: str) -> aiosqlite.Row | None:
     return await db.fetchone(
         "SELECT * FROM users WHERE lower(username) = lower(?)", (username.lstrip("@"),)

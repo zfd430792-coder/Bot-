@@ -1,9 +1,9 @@
 """Сборка служебных роутеров.
 
-Порядок: сначала вход в панель и «⬅️ В админку» — раньше разделов с вводом
-текста, иначе кнопку «назад» принял бы за ответ, например, шаг рассылки.
-Затем разделы владельца (у них более узкий фильтр), затем общие для персонала.
-Так модератор, нажавший кнопку владельца, не получит доступ.
+Разделы владельца идут раньше общих для персонала: у них фильтр уже, и
+модератор, нажавший кнопку владельца, до обработчика просто не доберётся.
+Кнопки — inline, поэтому нажатие «назад» не спутать с ответом на вопрос:
+оно приходит не текстом, а отдельным событием.
 """
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from aiogram import Router
 from app.handlers.admin import ads, broadcast, moderation, panel, staff
 
 router = Router(name="admin")
-router.include_router(panel.nav_router)
 router.include_router(panel.admin_router)
 router.include_router(staff.router)
 router.include_router(ads.router)

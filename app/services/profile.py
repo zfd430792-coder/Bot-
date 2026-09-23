@@ -7,7 +7,9 @@ from typing import Any, Mapping, Sequence
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.types import Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import (
+    InlineKeyboardMarkup, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove,
+)
 
 from app.db.database import norm_text
 from app.services import geo
@@ -106,7 +108,8 @@ def render_card(user: Mapping[str, Any], *, viewer: Mapping[str, Any] | None = N
 
 
 async def send_card(bot: Bot, chat_id: int, user: Mapping[str, Any], *,
-                    markup: ReplyKeyboardMarkup | ReplyKeyboardRemove | None = None,
+                    markup: InlineKeyboardMarkup | ReplyKeyboardMarkup
+                    | ReplyKeyboardRemove | None = None,
                     viewer: Mapping[str, Any] | None = None,
                     show_distance: bool = True,
                     admin_view: bool = False,

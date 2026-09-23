@@ -1,11 +1,13 @@
 """Вход в бота: капча -> приветствие -> предупреждение о мошенниках.
 
-Всё это — один экран: следующий шаг заменяет предыдущий, а повторный /start
-убирает то, что было на экране, вместо того чтобы прислать ещё одну копию.
+Всё это — один экран: следующий шаг встаёт на место предыдущего, а повторный
+/start убирает то, что было на экране, вместо того чтобы прислать ещё одну
+копию.
 
-Капча — на нижних кнопках: номера клеток 1–15, «Готово» и «Другая картинка».
-Выбранные клетки видны строкой в подписи к картинке — её бот правит на месте
-при каждом нажатии, новых сообщений не появляется.
+Капча — на inline-кнопках под картинкой: номера клеток 1–15, «Готово» и
+«Другая картинка». В callback_data лежат случайные токены, а не номера, —
+соответствие хранится только на сервере. Выбранные клетки отмечаются ✅
+прямо на кнопках.
 """
 from __future__ import annotations
 
@@ -44,12 +46,18 @@ async def begin(bot: Bot, chat_id: int, state: FSMContext, user: Mapping[str, An
                 settings: Settings, is_admin: bool, *, first_name: str = "") -> None:
     """Вход с любого места: капча, правила, анкета или меню — что нужно сейчас."""
     await state.clear()
+    # Новичку бот ещё ничего не показывал — нижней клавиатуры у него нет, и
+    # снимать её служебным сообщением незачем. Тем, кто застал версию с
+    # нижними кнопками, клавиатуру снимем один раз, даже если они вернулись
+    # спустя недели: поэтому смотрим на дату в базе, а не только на экран.
+    if users_repo.just_created(user) and await screen.is_fresh(state):
+        await screen.assume_clean_keyboard(state)
 
     # Приём новых анкет можно приостановить из админ-панели.
     # Проверяем до капчи: незачем гонять новичка через задание, если вход закрыт.
     if (not user["registered"] and not is_admin
             and await mod_repo.get_setting("registration_open", "1") != "1"):
-        await screen.send(bot, chat_id, state, texts.REGISTRATION_CLOSED, rkb.REMOVE)
+        await screen.show(bot, chat_id, state, texts.REGISTRATION_CLOSED)
         return
 
     # Владельцу капча не показывается — проверка нужна против ботов, не против него
@@ -61,8 +69,8 @@ async def begin(bot: Bot, chat_id: int, state: FSMContext, user: Mapping[str, An
     if not user["captcha_passed"]:
         blocked = await captcha_repo.blocked_seconds(user["id"])
         if blocked:
-            await screen.send(bot, chat_id, state, texts.CAPTCHA_BLOCKED.format(
-                minutes=max(1, blocked // 60)), rkb.RECHECK)
+            await screen.show(bot, chat_id, state, texts.CAPTCHA_BLOCKED.format(
+                minutes=max(1, blocked // 60)), kb.RETRY)
             return
         await issue_captcha(bot, chat_id, state, settings)
         return
@@ -81,17 +89,18 @@ async def begin(bot: Bot, chat_id: int, state: FSMContext, user: Mapping[str, An
 
 # ──────────────────────────────── Капча ─────────────────────────────────────
 
-def _caption(data: Mapping[str, Any], settings: Settings, status: str = "") -> str:
-    selected = sorted(data.get("cap_selected") or [])
-    if selected:
-        status += texts.CAPTCHA_SELECTED.format(labels=", ".join(map(str, selected)))
+def _caption(data: Mapping[str, Any], settings: Settings) -> str:
     return texts.CAPTCHA_TASK.format(
         title=data.get("cap_title") or texts.CAPTCHA_TITLE,
         task=data.get("cap_task") or "",
-        status=status,
         attempt=data.get("cap_attempt") or 1,
         total=settings.captcha_max_attempts,
     )
+
+
+def _buttons(data: Mapping[str, Any]) -> list[tuple[str, int]]:
+    tokens: dict[str, int] = data.get("cap_tokens") or {}
+    return sorted(tokens.items(), key=lambda kv: kv[1])
 
 
 async def issue_captcha(bot: Bot, chat_id: int, state: FSMContext,
@@ -104,6 +113,7 @@ async def issue_captcha(bot: Bot, chat_id: int, state: FSMContext,
 
     await state.set_state(Onboarding.captcha)
     await state.update_data(
+        cap_tokens=challenge.tokens,
         cap_correct=challenge.correct,
         cap_selected=[],
         cap_started=time.monotonic(),
@@ -112,64 +122,56 @@ async def issue_captcha(bot: Bot, chat_id: int, state: FSMContext,
         cap_task=challenge.task,
         cap_attempt=min(used + 1, settings.captcha_max_attempts),
     )
+    await screen.prepare(bot, chat_id, state)
     sent = await bot.send_photo(
         chat_id,
         BufferedInputFile(challenge.image, filename="captcha.png"),
         caption=_caption(await state.get_data(), settings),
-        reply_markup=rkb.captcha(refreshes < settings.captcha_max_refresh),
+        reply_markup=kb.captcha(challenge.buttons, set(),
+                                refreshes < settings.captcha_max_refresh),
     )
-    await screen.replace(bot, chat_id, state, [sent.message_id])
+    await screen.remember(state, [sent.message_id])
 
 
-async def _update_caption(bot: Bot, chat_id: int, state: FSMContext,
-                          settings: Settings, status: str = "") -> None:
-    """Обновляет подпись капчи: какие клетки выбраны и что пошло не так."""
-    ids = await screen.message_ids(state)
-    if not ids:
-        return
-    try:
-        await bot.edit_message_caption(
-            chat_id=chat_id, message_id=ids[-1],
-            caption=_caption(await state.get_data(), settings, status),
-        )
-    except TelegramBadRequest:
-        pass    # подпись не изменилась или сообщение уже убрано
-
-
-@router.message(Onboarding.captcha, F.text.regexp(r"^\d{1,2}$"))
-async def captcha_toggle(message: Message, state: FSMContext,
+@router.callback_query(Onboarding.captcha, F.data.startswith("cap:tok:"))
+async def captcha_toggle(call: CallbackQuery, state: FSMContext,
                          settings: Settings) -> None:
-    """Номер клетки: выбрать или снять выбор. Что выбрано — видно в подписи."""
-    await screen.drop(message)
-    label = int(message.text or "0")
-    if not 1 <= label <= captcha_service.CELLS:
-        return
+    """Номер клетки: выбрать или снять выбор. Выбранное отмечено ✅ на кнопке."""
+    token = (call.data or "").removeprefix("cap:tok:")
     data = await state.get_data()
+    label = (data.get("cap_tokens") or {}).get(token)
+    if label is None:
+        await call.answer()     # кнопка от прежней картинки
+        return
     selected = set(data.get("cap_selected") or [])
     selected.symmetric_difference_update({label})
     await state.update_data(cap_selected=sorted(selected))
-    await _update_caption(message.bot, message.chat.id, state, settings)
+    can_refresh = int(data.get("cap_refresh", 0)) < settings.captcha_max_refresh
+    try:
+        await call.message.edit_reply_markup(
+            reply_markup=kb.captcha(_buttons(data), selected, can_refresh))
+    except TelegramBadRequest:
+        pass    # клавиатура не изменилась или сообщение уже убрано
+    await call.answer()
 
 
-@router.message(Onboarding.captcha, F.text == rkb.CAPTCHA_NEW)
-async def captcha_refresh(message: Message, state: FSMContext, bot: Bot,
+@router.callback_query(Onboarding.captcha, F.data == "cap:new")
+async def captcha_refresh(call: CallbackQuery, state: FSMContext, bot: Bot,
                           settings: Settings) -> None:
-    await screen.drop(message)
     used = int((await state.get_data()).get("cap_refresh", 0))
     if used >= settings.captcha_max_refresh:
-        await _update_caption(bot, message.chat.id, state, settings,
-                              texts.CAPTCHA_REFRESH_LIMIT)
+        await call.answer(texts.CAPTCHA_REFRESH_LIMIT, show_alert=True)
         return
+    await call.answer()
     await state.update_data(cap_refresh=used + 1)
-    await issue_captcha(bot, message.chat.id, state, settings)
+    await issue_captcha(bot, screen.chat_id(call), state, settings)
 
 
-@router.message(Onboarding.captcha, F.text == rkb.CAPTCHA_DONE)
-async def captcha_submit(message: Message, state: FSMContext, bot: Bot,
+@router.callback_query(Onboarding.captcha, F.data == "cap:done")
+async def captcha_submit(call: CallbackQuery, state: FSMContext, bot: Bot,
                          user: Mapping[str, Any], settings: Settings,
                          is_admin: bool) -> None:
-    await screen.drop(message)
-    chat_id = message.chat.id
+    chat_id = screen.chat_id(call)
     data = await state.get_data()
     selected = list(data.get("cap_selected") or [])
     correct = list(data.get("cap_correct") or [])
@@ -177,8 +179,9 @@ async def captcha_submit(message: Message, state: FSMContext, bot: Bot,
     elapsed_ms = (time.monotonic() - started) * 1000 if started else 0
 
     if not selected:
-        await _update_caption(bot, chat_id, state, settings, texts.CAPTCHA_EMPTY)
+        await call.answer(texts.CAPTCHA_EMPTY, show_alert=True)
         return
+    await call.answer()
 
     # Слишком быстро — человек физически не успевает рассмотреть 15 клеток
     if elapsed_ms < settings.captcha_min_solve_ms:
@@ -209,6 +212,16 @@ async def captcha_submit(message: Message, state: FSMContext, bot: Bot,
     await send_welcome(bot, chat_id, state, user, note=texts.CAPTCHA_PASSED)
 
 
+@router.callback_query(F.data.startswith("cap:"))
+async def captcha_stale(call: CallbackQuery, state: FSMContext, bot: Bot,
+                        user: Mapping[str, Any], settings: Settings,
+                        is_admin: bool) -> None:
+    """Кнопка капчи вне проверки — от старой картинки выше по чату."""
+    await call.answer()
+    await begin(bot, screen.chat_id(call), state, user, settings, is_admin,
+                first_name=call.from_user.first_name or "")
+
+
 @router.message(Onboarding.captcha)
 async def captcha_other(message: Message) -> None:
     """Посторонний текст во время капчи просто убираем: всё нужное — на кнопках."""
@@ -225,8 +238,8 @@ async def _fail_captcha(bot: Bot, chat_id: int, state: FSMContext,
 
     if left <= 0:
         await state.clear()
-        await screen.send(bot, chat_id, state,
-                          texts.CAPTCHA_BLOCKED.format(minutes=block_minutes), rkb.RECHECK)
+        await screen.show(bot, chat_id, state,
+                          texts.CAPTCHA_BLOCKED.format(minutes=block_minutes), kb.RETRY)
         await admin_log(
             bot,
             f"🤖 Капча: пользователь <code>{user['id']}</code> "
@@ -244,39 +257,47 @@ async def send_welcome(bot: Bot, chat_id: int, state: FSMContext,
                        user: Mapping[str, Any], note: str | None = None) -> None:
     await state.set_state(Onboarding.welcome)
     text = texts.WELCOME.format(name=profile.esc(user["tg_name"] or "друг"))
-    await screen.send(bot, chat_id, state, f"{note}\n\n{text}" if note else text,
-                      rkb.WELCOME)
+    await screen.show(bot, chat_id, state, f"{note}\n\n{text}" if note else text,
+                      kb.WELCOME)
 
 
-@router.message(F.text == rkb.NEXT)
-async def show_warning(message: Message, state: FSMContext, bot: Bot,
-                       user: Mapping[str, Any], settings: Settings,
-                       is_admin: bool) -> None:
-    """Приветствие уходит, на его месте появляется предупреждение."""
-    await screen.drop(message)
-    chat_id = message.chat.id
-    # Нижняя кнопка — просто текст, и прислать его можно в обход капчи.
-    # Правила уже приняты — кнопка из старой клавиатуры. В обоих случаях
-    # begin() покажет то, что нужно сейчас.
+async def show_warning(bot: Bot, chat_id: int, state: FSMContext,
+                       user: Mapping[str, Any], settings: Settings, is_admin: bool,
+                       first_name: str = "") -> None:
+    """Приветствие превращается в предупреждение, кнопка «Принимаю» — через паузу."""
+    # «Далее» можно прислать и в обход капчи, и со старого сообщения, когда
+    # правила уже приняты. В обоих случаях begin() покажет то, что нужно сейчас.
     if user["rules_accepted"] or not user["captcha_passed"]:
-        await begin(bot, chat_id, state, user, settings, is_admin,
-                    first_name=message.from_user.first_name or "")
+        await begin(bot, chat_id, state, user, settings, is_admin, first_name=first_name)
         return
 
     seconds = max(1, settings.rules_delay_seconds)
     warning = texts.WARNING.format(min_age=settings.min_age)
-    # У правил inline-кнопка «Принимаю», а она не уживается в одном сообщении
-    # со снятием нижней клавиатуры — снимаем её отдельно
-    await screen.hide_reply_keyboard(bot, chat_id)
-    sent = await screen.send(bot, chat_id, state,
-                             warning + texts.WARNING_COUNTDOWN.format(sec=seconds))
+    message_id = await screen.show(bot, chat_id, state,
+                                   warning + texts.WARNING_COUNTDOWN.format(sec=seconds))
     await state.set_state(Onboarding.rules)
 
-    task = asyncio.create_task(
-        _countdown(bot, sent.chat.id, sent.message_id, seconds, warning)
-    )
+    task = asyncio.create_task(_countdown(bot, chat_id, message_id, seconds, warning))
     _countdown_tasks.add(task)
     task.add_done_callback(_countdown_tasks.discard)
+
+
+@router.callback_query(F.data == "onb:next")
+async def next_button(call: CallbackQuery, state: FSMContext, bot: Bot,
+                      user: Mapping[str, Any], settings: Settings,
+                      is_admin: bool) -> None:
+    await call.answer()
+    await show_warning(bot, screen.chat_id(call), state, user, settings, is_admin,
+                       first_name=call.from_user.first_name or "")
+
+
+@router.message(F.text == rkb.L_NEXT)
+async def next_legacy(message: Message, state: FSMContext, bot: Bot,
+                      user: Mapping[str, Any], settings: Settings,
+                      is_admin: bool) -> None:
+    await screen.drop(message)
+    await show_warning(bot, message.chat.id, state, user, settings, is_admin,
+                       first_name=message.from_user.first_name or "")
 
 
 async def _countdown(bot: Bot, chat_id: int, message_id: int, seconds: int,
@@ -307,7 +328,7 @@ async def _countdown(bot: Bot, chat_id: int, message_id: int, seconds: int,
 async def accept_rules(call: CallbackQuery, state: FSMContext, bot: Bot,
                        user: Mapping[str, Any], settings: Settings,
                        is_admin: bool) -> None:
-    chat_id = call.message.chat.id if call.message else call.from_user.id
+    chat_id = screen.chat_id(call)
     if user["registered"] or (not user["captcha_passed"] and not is_admin):
         # Нажатие можно прислать и без капчи, и со старого сообщения —
         # begin() покажет то, что нужно сейчас
@@ -328,18 +349,31 @@ async def accept_rules(call: CallbackQuery, state: FSMContext, bot: Bot,
 
 # ─────────────────────── Повторная проверка username ────────────────────────
 
-@router.message(F.text == rkb.USERNAME_DONE)
-async def recheck_username(message: Message, state: FSMContext, bot: Bot,
-                           user: Mapping[str, Any], settings: Settings,
-                           is_admin: bool) -> None:
-    await screen.drop(message)
-    username = message.from_user.username
+async def _recheck_username(bot: Bot, chat_id: int, state: FSMContext, tg_user,
+                            settings: Settings, is_admin: bool) -> None:
+    username = tg_user.username
     if not username:
-        await screen.send(bot, message.chat.id, state,
+        await screen.show(bot, chat_id, state,
                           f"{texts.USERNAME_STILL_MISSING}\n\n{texts.NEED_USERNAME}",
-                          rkb.USERNAME_CHECK)
+                          kb.USERNAME_CHECK)
         return
-    await users_repo.update_user(message.from_user.id, username=username)
-    fresh = await users_repo.get_user(message.from_user.id)
-    await begin(bot, message.chat.id, state, fresh, settings, is_admin,
-                first_name=message.from_user.first_name or "")
+    await users_repo.update_user(tg_user.id, username=username)
+    fresh = await users_repo.get_user(tg_user.id)
+    await begin(bot, chat_id, state, fresh, settings, is_admin,
+                first_name=tg_user.first_name or "")
+
+
+@router.callback_query(F.data == "onb:username")
+async def recheck_username(call: CallbackQuery, state: FSMContext, bot: Bot,
+                           settings: Settings, is_admin: bool) -> None:
+    await call.answer()
+    await _recheck_username(bot, screen.chat_id(call), state, call.from_user,
+                            settings, is_admin)
+
+
+@router.message(F.text == rkb.L_USERNAME_DONE)
+async def recheck_username_legacy(message: Message, state: FSMContext, bot: Bot,
+                                  settings: Settings, is_admin: bool) -> None:
+    await screen.drop(message)
+    await _recheck_username(bot, message.chat.id, state, message.from_user,
+                            settings, is_admin)

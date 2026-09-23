@@ -31,6 +31,7 @@ from app.config import Settings
 from app.db import moderation as mod_repo
 from app.db import users as users_repo
 from app.db.database import db
+from app.keyboards import inline as kb
 from app.keyboards import reply as rkb
 from app.services.notify import appeal_contact, notify_admins, safe_send
 
@@ -48,7 +49,7 @@ REASON_TEXT = {
 WARNING = (
     "⚠️ <b>Похоже, анкеты листают слишком быстро</b>\n\n"
     "Так делают спам-боты, поэтому нужно ещё раз подтвердить, что вы человек.\n"
-    "Нажмите /start и пройдите проверку.\n\n"
+    "Нажмите кнопку ниже и пройдите проверку.\n\n"
     "<i>Если повторится — доступ будет заблокирован автоматически.</i>"
 )
 
@@ -169,7 +170,7 @@ async def punish(bot: Bot, user_id: int, verdict: Verdict,
     if verdict.action == "captcha":
         # Мягкая мера: сбрасываем проверку, бот попросит пройти капчу заново
         await users_repo.update_user(user_id, captcha_passed=0)
-        await safe_send(bot, user_id, WARNING, rkb.RECHECK)
+        await safe_send(bot, user_id, WARNING, kb.RETRY)
         note = "🔁 сброшена капча"
     else:
         until = None

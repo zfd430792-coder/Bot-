@@ -1,8 +1,10 @@
 """Лента анкет: просмотр, лайки, лимиты и взаимные симпатии.
 
-Карточка анкеты — это экран с нижними кнопками «❤️ 💌 👎 🚨 🏠»: следующая
-заменяет предыдущую, а вопросы по ходу (сообщение к лайку, жалоба)
-появляются под ней и уходят вместе с ней.
+Карточка анкеты — это экран с inline-кнопками «❤️ 💌 👎 🚨 🏠» под ней:
+следующая заменяет предыдущую. Кнопки несут id анкеты, поэтому нажатие на
+карточке делает ровно то, что на ней написано. Вопросы по ходу (сообщение
+к лайку, жалоба) появляются под карточкой и уходят вместе с ней, а отказ
+(кончился лимит лайков) — всплывающим окном, без лишних сообщений.
 
 Порядок — как в Дайвинчике, настраивать нечего:
 
@@ -19,9 +21,10 @@ import logging
 from typing import Any, Mapping
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from app import texts
 from app.config import Settings
@@ -31,6 +34,7 @@ from app.db import users as users_repo
 from app.db.database import haversine
 from app.handlers import menu as menu_handlers
 from app.handlers.registration import LINK_RE
+from app.keyboards import inline as kb
 from app.keyboards import reply as rkb
 from app.services import ads as ads_service
 from app.services import antifraud, profile, screen
@@ -93,8 +97,6 @@ async def _present(bot: Bot, chat_id: int, state: FSMContext, viewer: Mapping[st
                    header: list[str], ads_seen: int) -> int:
     """Отправляет карточку (и рекламу перед ней, если пора) вместо прежнего экрана.
     Возвращает новый счётчик анкет с прошлой рекламы."""
-    ad_messages, ads_seen = await ads_service.maybe_send(bot, chat_id, ads_seen)
-
     liked = await reactions_repo.liked_me(viewer["id"], target["id"])
     free = liked or settings.is_admin(viewer["id"])
     left = (None if free
@@ -104,11 +106,15 @@ async def _present(bot: Bot, chat_id: int, state: FSMContext, viewer: Mapping[st
         # Нас уже лайкнули: говорим об этом и показываем приложенное сообщение
         header = [*header, texts.LIKED_YOU]
         note = await reactions_repo.get_note(target["id"], viewer["id"])
+
+    await screen.prepare(bot, chat_id, state)
+    ad_messages, ads_seen = await ads_service.maybe_send(bot, chat_id, ads_seen)
     message_ids = await profile.send_card(
-        bot, chat_id, _with_distance(target, viewer), markup=rkb.feed(left),
+        bot, chat_id, _with_distance(target, viewer),
+        markup=kb.feed(int(target["id"]), left),
         viewer=viewer, note=note, header="\n".join(header),
     )
-    await screen.replace(bot, chat_id, state, ad_messages + message_ids)
+    await screen.remember(state, ad_messages + message_ids)
     await state.set_state(Browsing.feed)
     return ads_seen
 
@@ -168,7 +174,7 @@ async def show_next(bot: Bot, chat_id: int, state: FSMContext,
     text = texts.NO_PROFILES
     if skipped:
         text += "\n\n" + texts.NO_PROFILES_SKIPPED.format(count=skipped)
-    await screen.send(bot, chat_id, state, _lead(header) + text, rkb.feed_end(skipped))
+    await screen.show(bot, chat_id, state, _lead(header) + text, kb.feed_end(skipped))
 
 
 async def _offer_far(bot: Bot, chat_id: int, state: FSMContext, viewer: Mapping[str, Any],
@@ -181,16 +187,14 @@ async def _offer_far(bot: Bot, chat_id: int, state: FSMContext, viewer: Mapping[
     text = texts.FEED_OFFER_FAR
     if skipped:
         text += "\n\n" + texts.NO_PROFILES_SKIPPED.format(count=skipped)
-    await screen.send(bot, chat_id, state, _lead(header) + text, rkb.far_offer(skipped))
+    await screen.show(bot, chat_id, state, _lead(header) + text, kb.far_offer(skipped))
 
 
 async def show_current(bot: Bot, chat_id: int, state: FSMContext,
                        user: Mapping[str, Any], settings: Settings, *,
                        notice: str | None = None) -> None:
-    """Показывает ту же анкету заново — после отменённой жалобы или сообщения.
-
-    Карточку приходится прислать ещё раз: вместе с ней вернётся клавиатура
-    ленты, а убрать чужую нижнюю клавиатуру иначе нельзя."""
+    """Показывает ту же анкету заново — например, со строкой о том, что лайк
+    не прошёл. Если её уже нельзя показать — следующую."""
     data = await state.get_data()
     target = await users_repo.get_user(int(data.get("current") or 0))
     if not _usable(target):
@@ -206,20 +210,38 @@ async def _current(state: FSMContext) -> int:
     return int((await state.get_data()).get("current") or 0)
 
 
+async def _answer_late(call: CallbackQuery, refusal: str | None) -> None:
+    """Ответ на нажатие после обработки — ради всплывающего окна с отказом.
+    Если обработка затянулась, Telegram уже не примет ответ: это не ошибка."""
+    try:
+        if refusal:
+            await call.answer(refusal, show_alert=True)     # анкета остаётся на экране
+        else:
+            await call.answer()
+    except TelegramBadRequest:
+        pass
+
+
+def _target(call: CallbackQuery) -> int:
+    """id анкеты из кнопки br:<действие>:<id>."""
+    tail = (call.data or "").rsplit(":", 1)[-1]
+    return int(tail) if tail.isdigit() else 0
+
+
 # ─────────────────────────── Входные точки ──────────────────────────────────
 
 async def _can_browse(bot: Bot, chat_id: int, state: FSMContext,
                       user: Mapping[str, Any]) -> bool:
     if not user["registered"]:
-        await screen.send(bot, chat_id, state,
-                          "Сначала заполните анкету — это пара минут.", rkb.START_AGAIN)
+        await screen.show(bot, chat_id, state,
+                          "Сначала заполните анкету — это пара минут.", kb.START_AGAIN)
         return False
     if not user["is_active"]:
-        await screen.send(
+        await screen.show(
             bot, chat_id, state,
             "🙈 Ваша анкета скрыта из поиска, поэтому смотреть чужие нельзя.\n"
             "Включите показ в разделе «👤 Моя анкета».",
-            rkb.keyboard([[rkb.PROFILE], [rkb.HOME]]),
+            kb.TO_PROFILE,
         )
         return False
     return True
@@ -230,75 +252,88 @@ async def open_feed(bot: Bot, chat_id: int, state: FSMContext,
                     notice: str | None = None) -> None:
     if not await _can_browse(bot, chat_id, state, user):
         return
+    await state.clear()
     await state.update_data(feed=[], tier_seen=users_repo.AREA_LOCAL, current=None)
     await show_next(bot, chat_id, state, user, settings, notice=notice)
 
 
 @router.message(Command("search"))
-@router.message(F.text == rkb.SEARCH)
-async def search(message: Message, state: FSMContext, bot: Bot,
-                 user: Mapping[str, Any], settings: Settings) -> None:
+async def search_command(message: Message, state: FSMContext, bot: Bot,
+                         user: Mapping[str, Any], settings: Settings) -> None:
     await screen.drop(message)
     await open_feed(bot, message.chat.id, state, user, settings)
 
 
-@router.message(F.text == rkb.FAR_YES)
-async def allow_far(message: Message, state: FSMContext, bot: Bot,
-                    user: Mapping[str, Any], settings: Settings) -> None:
+@router.callback_query(F.data.in_({"m:search", "n:search"}))
+async def search_button(call: CallbackQuery, state: FSMContext, bot: Bot,
+                        user: Mapping[str, Any], settings: Settings) -> None:
+    """Из меню или из уведомления: уведомление при этом остаётся в чате."""
+    await call.answer()
+    await open_feed(bot, screen.chat_id(call), state, user, settings)
+
+
+async def _allow_far(bot: Bot, chat_id: int, state: FSMContext,
+                     user: Mapping[str, Any], settings: Settings) -> None:
     """Согласие смотреть соседние области. Запоминаем его: в следующий раз
     лента перейдёт к ним сама, без вопроса."""
-    await screen.drop(message)
-    if not await _can_browse(bot, message.chat.id, state, user):
+    if not await _can_browse(bot, chat_id, state, user):
         return
     await users_repo.update_user(user["id"], search_scope=users_repo.SCOPE_ALL)
-    await show_next(bot, message.chat.id, state, user, settings)
+    await show_next(bot, chat_id, state, user, settings)
 
 
-@router.message(F.text.startswith(rkb.RESET_SKIPS))
-async def reset_skipped(message: Message, state: FSMContext, bot: Bot,
-                        user: Mapping[str, Any], settings: Settings) -> None:
+@router.callback_query(F.data == "br:far")
+async def far_button(call: CallbackQuery, state: FSMContext, bot: Bot,
+                     user: Mapping[str, Any], settings: Settings) -> None:
+    await call.answer()
+    await _allow_far(bot, screen.chat_id(call), state, user, settings)
+
+
+async def _reset_skipped(bot: Bot, chat_id: int, state: FSMContext,
+                         user: Mapping[str, Any], settings: Settings) -> None:
     """Конец ленты: вернуть в выдачу всех, кого пропустили."""
-    await screen.drop(message)
     removed = await reactions_repo.reset_dislikes(user["id"], older_than_days=0)
-    await open_feed(bot, message.chat.id, state, user, settings,
+    await open_feed(bot, chat_id, state, user, settings,
                     notice=f"🔄 <i>Вернул пропущенные анкеты: {removed}</i>")
 
 
-@router.message(F.text == rkb.STOP_REMINDERS)
-async def stop_reminders(message: Message, state: FSMContext, user,
+@router.callback_query(F.data == "br:reset")
+async def reset_button(call: CallbackQuery, state: FSMContext, bot: Bot,
+                       user: Mapping[str, Any], settings: Settings) -> None:
+    await call.answer()
+    await _reset_skipped(bot, screen.chat_id(call), state, user, settings)
+
+
+@router.callback_query(F.data == "n:mute")
+async def stop_reminders(call: CallbackQuery, state: FSMContext, user,
                          is_admin: bool) -> None:
     """Отписка прямо из напоминания."""
-    await screen.drop(message)
     await users_repo.update_user(user["id"], notify_enabled=0)
-    await menu_handlers.show_menu(message.bot, message.chat.id, state, user, is_admin,
-                                  note="🔕 <i>Больше не напомню.</i>")
+    await call.answer("🔕 Больше не напомню.")
+    await menu_handlers.show_menu(call.bot, screen.chat_id(call), state, user, is_admin)
 
 
 # ───────────────────────────── Реакции ──────────────────────────────────────
 
-@router.message(F.text.regexp(rkb.LIKE_RE))
-async def like(message: Message, state: FSMContext, bot: Bot,
-               user: Mapping[str, Any], settings: Settings) -> None:
-    await screen.drop(message)
-    chat_id = message.chat.id
-    target_id = await _current(state)
-    if not target_id:
-        await open_feed(bot, chat_id, state, user, settings)
-        return
+async def _like(bot: Bot, chat_id: int, state: FSMContext, user: Mapping[str, Any],
+                settings: Settings, target_id: int) -> str | None:
+    """Ставит лайк и показывает следующую анкету.
+    Возвращает текст отказа, если лайк не прошёл (кончился лимит)."""
+    target = await users_repo.get_user(target_id)
+    if not _usable(target):
+        await show_next(bot, chat_id, state, user, settings)
+        return None
     limit = await _likes_limit(settings)
-
     free = await _like_is_free(user["id"], target_id, settings)
     if not free and not await users_repo.consume_like(user["id"], limit):
-        await _notice_under_card(bot, chat_id, state,
-                                 texts.LIKE_LIMIT_ALERT.format(limit=limit))
-        return
+        return texts.LIKE_LIMIT_POPUP.format(limit=limit)
 
     matched = await reactions_repo.add_reaction(user["id"], target_id, "like")
 
     # Накрутка лайков: слишком быстро или вообще без пропусков
     if await antifraud.check(bot, user["id"], settings):
         await state.clear()
-        return
+        return None
 
     if matched:
         await _announce_match(bot, user, target_id)
@@ -308,79 +343,114 @@ async def like(message: Message, state: FSMContext, bot: Bot,
     await show_next(bot, chat_id, state, user, settings,
                     notice="🎉 <b>Взаимно!</b> Контакты — в сообщении выше." if matched
                     else None)
+    return None
 
 
-@router.message(F.text == rkb.DISLIKE)
-async def dislike(message: Message, state: FSMContext, bot: Bot,
-                  user: Mapping[str, Any], settings: Settings) -> None:
-    await screen.drop(message)
-    target_id = await _current(state)
-    if not target_id:
-        await open_feed(bot, message.chat.id, state, user, settings)
-        return
+async def _dislike(bot: Bot, chat_id: int, state: FSMContext, user: Mapping[str, Any],
+                   settings: Settings, target_id: int) -> None:
     await reactions_repo.add_reaction(user["id"], target_id, "dislike")
     if await antifraud.check(bot, user["id"], settings):
         await state.clear()
         return
-    await show_next(bot, message.chat.id, state, user, settings)
+    await show_next(bot, chat_id, state, user, settings)
 
 
-async def _notice_under_card(bot: Bot, chat_id: int, state: FSMContext,
-                             text: str) -> None:
-    """Короткое пояснение под анкетой. Клавиатура остаётся от карточки, а
-    с переходом к следующей анкете пояснение уйдёт вместе с экраном."""
-    sent = await bot.send_message(chat_id, text)
-    await screen.add(state, [sent.message_id])
+@router.callback_query(F.data.startswith("br:like:"))
+async def like_button(call: CallbackQuery, state: FSMContext, bot: Bot,
+                      user: Mapping[str, Any], settings: Settings) -> None:
+    target_id = _target(call) or await _current(state)
+    if not target_id:
+        await call.answer()
+        await open_feed(bot, screen.chat_id(call), state, user, settings)
+        return
+    refusal = await _like(bot, screen.chat_id(call), state, user, settings, target_id)
+    await _answer_late(call, refusal)
+
+
+@router.callback_query(F.data.startswith("br:dislike:"))
+async def dislike_button(call: CallbackQuery, state: FSMContext, bot: Bot,
+                         user: Mapping[str, Any], settings: Settings) -> None:
+    await call.answer()
+    target_id = _target(call) or await _current(state)
+    if not target_id:
+        await open_feed(bot, screen.chat_id(call), state, user, settings)
+        return
+    await _dislike(bot, screen.chat_id(call), state, user, settings, target_id)
 
 
 # ───────────────────── Лайк с сообщением ────────────────────────────────────
 
 async def _note_prompt(bot: Bot, chat_id: int, state: FSMContext,
                        settings: Settings, error: str | None = None) -> None:
-    """Вопрос «что написать» под карточкой. Ошибка — новым вопросом на его месте."""
-    data = await state.get_data()
-    old = data.get("note_prompt")
+    """Вопрос «что написать» под карточкой. Ошибка — правкой того же вопроса."""
     text = texts.LIKE_NOTE_ASK.format(max_len=settings.note_max_len)
     if error:
         text = f"⚠️ {error}\n\n{text}"
-    sent = await bot.send_message(chat_id, text, reply_markup=rkb.CANCEL_ONLY)
+    prompt = (await state.get_data()).get("note_prompt")
+    if prompt:
+        try:
+            await bot.edit_message_text(text, chat_id=chat_id, message_id=prompt,
+                                        reply_markup=kb.NOTE_CANCEL)
+            return
+        except Exception:
+            pass    # вопрос удалили — зададим заново
+    sent = await bot.send_message(chat_id, text, reply_markup=kb.NOTE_CANCEL)
     await screen.add(state, [sent.message_id])
-    if old:
-        await profile.delete_messages(bot, chat_id, [old])
-        await screen.forget(state, [old])
     await state.update_data(note_prompt=sent.message_id)
 
 
-@router.message(F.text == rkb.NOTE)
-async def ask_note(message: Message, state: FSMContext, bot: Bot,
-                   user: Mapping[str, Any], settings: Settings) -> None:
-    """Сначала убеждаемся, что лайк вообще возможен — иначе текст писался зря."""
-    await screen.drop(message)
-    chat_id = message.chat.id
-    target_id = await _current(state)
-    if not target_id:
-        await open_feed(bot, chat_id, state, user, settings)
-        return
+async def _remove_prompt(bot: Bot, chat_id: int, state: FSMContext, key: str) -> None:
+    """Убирает вопрос под карточкой — сама карточка с кнопками остаётся."""
+    prompt = (await state.get_data()).get(key)
+    if prompt:
+        await profile.delete_messages(bot, chat_id, [prompt])
+        await screen.forget(state, [prompt])
+    await state.update_data(**{key: None})
+
+
+async def _ask_note(bot: Bot, chat_id: int, state: FSMContext, user: Mapping[str, Any],
+                    settings: Settings, target_id: int) -> str | None:
+    """Сначала убеждаемся, что лайк вообще возможен — иначе текст писался зря.
+    Возвращает текст отказа."""
     limit = await _likes_limit(settings)
     fresh = await users_repo.get_user(user["id"])
     free = await _like_is_free(user["id"], target_id, settings)
     if not free and await users_repo.likes_left(fresh, limit) <= 0:
-        await _notice_under_card(bot, chat_id, state,
-                                 texts.LIKE_LIMIT_ALERT.format(limit=limit))
-        return
-
+        return texts.LIKE_LIMIT_POPUP.format(limit=limit)
+    await _remove_prompt(bot, chat_id, state, "report_prompt")
     await state.set_state(Browsing.note)
-    await state.update_data(note_target=target_id, note_prompt=None)
+    await state.update_data(note_target=target_id, current=target_id)
     await _note_prompt(bot, chat_id, state, settings)
+    return None
+
+
+@router.callback_query(F.data.startswith("br:note:"))
+async def note_button(call: CallbackQuery, state: FSMContext, bot: Bot,
+                      user: Mapping[str, Any], settings: Settings) -> None:
+    target_id = _target(call) or await _current(state)
+    if not target_id:
+        await call.answer()
+        await open_feed(bot, screen.chat_id(call), state, user, settings)
+        return
+    refusal = await _ask_note(bot, screen.chat_id(call), state, user, settings, target_id)
+    await _answer_late(call, refusal)
+
+
+@router.callback_query(F.data == "br:cancel")
+async def cancel_note(call: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    """Передумал писать — вопрос уходит, анкета остаётся на экране."""
+    await call.answer()
+    await _remove_prompt(bot, screen.chat_id(call), state, "note_prompt")
+    await state.update_data(note_target=None)
+    await state.set_state(Browsing.feed)
 
 
 @router.message(Browsing.note, F.text == rkb.CANCEL)
-async def cancel_note(message: Message, state: FSMContext, bot: Bot,
-                      user: Mapping[str, Any], settings: Settings) -> None:
-    """Передумал писать — анкета снова на экране с кнопками ленты."""
+async def cancel_note_legacy(message: Message, state: FSMContext, bot: Bot) -> None:
     await screen.drop(message)
-    await state.update_data(note_prompt=None, note_target=None)
-    await show_current(bot, message.chat.id, state, user, settings)
+    await _remove_prompt(bot, message.chat.id, state, "note_prompt")
+    await state.update_data(note_target=None)
+    await state.set_state(Browsing.feed)
 
 
 @router.message(Browsing.note, F.text)
@@ -437,6 +507,59 @@ async def note_hint(message: Message, state: FSMContext, bot: Bot,
                        "Напишите сообщение текстом.")
 
 
+# ─────────── Нижние кнопки ленты прежней версии: к текущей анкете ───────────
+
+@router.message(F.text.regexp(rkb.L_LIKE_RE))
+async def like_legacy(message: Message, state: FSMContext, bot: Bot,
+                      user: Mapping[str, Any], settings: Settings) -> None:
+    await screen.drop(message)
+    chat_id = message.chat.id
+    target_id = await _current(state)
+    if not target_id:
+        await open_feed(bot, chat_id, state, user, settings)
+        return
+    refusal = await _like(bot, chat_id, state, user, settings, target_id)
+    if refusal:
+        await show_current(bot, chat_id, state, user, settings,
+                           notice=texts.LIKE_LIMIT_ALERT.format(
+                               limit=await _likes_limit(settings)))
+
+
+@router.message(F.text == rkb.L_DISLIKE)
+async def dislike_legacy(message: Message, state: FSMContext, bot: Bot,
+                         user: Mapping[str, Any], settings: Settings) -> None:
+    await screen.drop(message)
+    target_id = await _current(state)
+    if not target_id:
+        await open_feed(bot, message.chat.id, state, user, settings)
+        return
+    await _dislike(bot, message.chat.id, state, user, settings, target_id)
+
+
+@router.message(F.text == rkb.L_NOTE)
+@router.message(F.text == rkb.L_REPORT)
+async def card_legacy(message: Message, state: FSMContext, bot: Bot,
+                      user: Mapping[str, Any], settings: Settings) -> None:
+    """«Сообщение» и «Жалоба» со старой клавиатуры: та же анкета — уже с
+    кнопками под ней, там всё и продолжится."""
+    await screen.drop(message)
+    await show_current(bot, message.chat.id, state, user, settings)
+
+
+@router.message(F.text == rkb.L_FAR)
+async def far_legacy(message: Message, state: FSMContext, bot: Bot,
+                     user: Mapping[str, Any], settings: Settings) -> None:
+    await screen.drop(message)
+    await _allow_far(bot, message.chat.id, state, user, settings)
+
+
+@router.message(F.text.regexp(rkb.L_RESET_RE))
+async def reset_legacy(message: Message, state: FSMContext, bot: Bot,
+                       user: Mapping[str, Any], settings: Settings) -> None:
+    await screen.drop(message)
+    await _reset_skipped(bot, message.chat.id, state, user, settings)
+
+
 # ───────────────────── Уведомления о симпатиях ──────────────────────────────
 
 async def _announce_match(bot: Bot, user: Mapping[str, Any], target_id: int) -> None:
@@ -457,16 +580,15 @@ async def _announce_match(bot: Bot, user: Mapping[str, Any], target_id: int) -> 
 
 
 async def _notify_like(bot: Bot, target_id: int, note: str | None) -> None:
-    """Сообщаем о симпатии.
+    """Сообщаем о симпатии — с кнопкой «Посмотреть», которая открывает ленту,
+    где этот человек первый. Само уведомление остаётся в чате.
 
-    Уведомление — без кнопок: у человека сейчас клавиатура того экрана, где он
-    находится, и сбивать её нельзя. Анкета ждёт первой в ленте. Об обычных
-    лайках говорим один раз, пока предыдущие не разобраны, иначе это
-    превратится в поток уведомлений; о лайке с сообщением — всегда.
+    Об обычных лайках говорим один раз, пока предыдущие не разобраны, иначе
+    это превратится в поток уведомлений; о лайке с сообщением — всегда.
     """
     if note:
-        await safe_send(bot, target_id, texts.NEW_LIKE_WITH_NOTE)
+        await safe_send(bot, target_id, texts.NEW_LIKE_WITH_NOTE, kb.NOTIFY_LIKE)
         return
     if await users_repo.count_incoming_likes(target_id) != 1:
         return
-    await safe_send(bot, target_id, texts.NEW_LIKE_NOTIFY)
+    await safe_send(bot, target_id, texts.NEW_LIKE_NOTIFY, kb.NOTIFY_LIKE)

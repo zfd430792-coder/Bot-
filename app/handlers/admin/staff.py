@@ -1,6 +1,6 @@
 """Назначение модераторов. Только для владельцев из ADMIN_IDS.
 
-Список — нижние кнопки «❌ Снять Имя (ID)»: номер человека в самой надписи,
+Список — inline-кнопки «❌ Снять Имя (ID)»: номер человека в самой кнопке,
 поэтому состояние для выбора не нужно.
 """
 from __future__ import annotations
@@ -8,14 +8,14 @@ from __future__ import annotations
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from app.config import get_settings
 from app.db import moderation as mod_repo
 from app.db import users as users_repo
 from app.db.database import db
 from app.handlers.admin.filters import IsAdmin
-from app.keyboards import reply as rkb
+from app.keyboards import inline as kb
 from app.services import commands as bot_commands
 from app.services import profile as profile_service
 from app.services import screen
@@ -24,6 +24,7 @@ from app.states import AdminPanel
 
 router = Router(name="admin-staff")
 router.message.filter(IsAdmin())
+router.callback_query.filter(IsAdmin())
 
 WELCOME = (
     "👮 <b>Вас назначили модератором</b>\n\n"
@@ -69,25 +70,30 @@ async def show_staff(bot: Bot, chat_id: int, state: FSMContext,
     )
     text = "\n".join(lines)
     await state.set_state(AdminPanel.staff_list)
-    await screen.send(bot, chat_id, state, f"{notice}\n\n{text}" if notice else text,
-                      rkb.staff_list(rows))
+    await screen.show(bot, chat_id, state, f"{notice}\n\n{text}" if notice else text,
+                      kb.staff_list(rows))
 
 
 @router.message(Command("mods"))
-@router.message(F.text == rkb.A_STAFF)
-async def open_staff(message: Message, state: FSMContext) -> None:
+async def mods_command(message: Message, state: FSMContext) -> None:
     await screen.drop(message)
     await show_staff(message.bot, message.chat.id, state)
 
 
-@router.message(AdminPanel.staff_list, F.text == rkb.A_STAFF_ADD)
-async def ask_moderator(message: Message, state: FSMContext) -> None:
-    await screen.drop(message)
+@router.callback_query(F.data == "adm:staff")
+async def staff_button(call: CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    await show_staff(call.bot, screen.chat_id(call), state)
+
+
+@router.callback_query(F.data == "adm:staff:add")
+async def ask_moderator(call: CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
     await state.set_state(AdminPanel.staff_add)
-    await screen.send(message.bot, message.chat.id, state,
+    await screen.show(call.bot, screen.chat_id(call), state,
                       "Кого назначить модератором? Пришлите ID или @username.\n\n"
                       "<i>Человек должен хотя бы раз запустить бота — иначе его нет "
-                      "в базе.</i>", rkb.ADMIN_BACK)
+                      "в базе.</i>", kb.STAFF_BACK)
 
 
 async def add_moderator(bot: Bot, admin_id: int, query: str) -> str:
@@ -132,13 +138,17 @@ async def add_from_panel(message: Message, state: FSMContext, bot: Bot) -> None:
     await show_staff(bot, message.chat.id, state, f"<i>{result}</i>")
 
 
-@router.message(AdminPanel.staff_list, F.text.regexp(rkb.STAFF_RE))
-async def remove_from_panel(message: Message, state: FSMContext, bot: Bot) -> None:
-    await screen.drop(message)
-    target_id = int(rkb.STAFF_RE.match(message.text or "").group(1))
-    await remove_moderator(bot, message.from_user.id, target_id)
-    await show_staff(bot, message.chat.id, state,
-                     f"<i>Права сняты: <code>{target_id}</code></i>")
+@router.callback_query(F.data.startswith("adm:staff:del:"))
+async def remove_from_panel(call: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await call.answer()
+    tail = (call.data or "").rsplit(":", 1)[-1]
+    target = await users_repo.get_user(int(tail)) if tail.isdigit() else None
+    if target is None or not target["is_moderator"]:
+        await show_staff(bot, screen.chat_id(call), state, "<i>Такого модератора нет</i>")
+        return
+    await remove_moderator(bot, call.from_user.id, int(target["id"]))
+    await show_staff(bot, screen.chat_id(call), state,
+                     f"<i>Права сняты: <code>{target['id']}</code></i>")
 
 
 @router.message(Command("addmod"))

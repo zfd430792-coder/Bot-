@@ -9,8 +9,8 @@
 * ночью не беспокоим: местный час считаем по долготе из анкеты;
 * в каждом сообщении есть кнопка «Больше не напоминать».
 
-Кнопки напоминания нижние: человек давно не заходил, так что незачем
-беречь клавиатуру экрана, на котором он был.
+Кнопки напоминания — inline, само напоминание остаётся в переписке, а
+«Смотреть анкеты» открывает ленту новым экраном.
 
 Текст подбирается по ситуации: есть непросмотренные лайки — зовём смотреть их,
 появились новые анкеты — говорим сколько, иначе шлём короткое напоминание.
@@ -28,7 +28,7 @@ from aiogram import Bot
 from app.config import Settings
 from app.db import moderation as mod_repo
 from app.db.database import db
-from app.keyboards import reply as rkb
+from app.keyboards import inline as kb
 from app.services.notify import safe_send
 
 log = logging.getLogger(__name__)
@@ -137,7 +137,7 @@ async def send_batch(bot: Bot, settings: Settings) -> int:
         if is_quiet(local_hour(row["lon"]), settings):
             continue          # у человека ночь — вернёмся к нему днём
 
-        ok = await safe_send(bot, int(row["id"]), compose(row), rkb.REMINDER)
+        ok = await safe_send(bot, int(row["id"]), compose(row), kb.REMINDER)
         if ok:
             sent += 1
             await db.execute(

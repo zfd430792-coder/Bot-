@@ -1,8 +1,10 @@
 """Модерация: баны, жалобы, верификация.
 
 Жалобы и заявки на верификацию разбираются по одной: на экране одна жалоба
-с карточкой нарушителя (или одна заявка с фото) и нижние кнопки решения.
-«⏭ Дальше» откладывает текущую до следующего захода в раздел.
+с карточкой нарушителя (или одна заявка с фото) и inline-кнопки решения.
+Кнопки несут номер жалобы или заявки, поэтому решение относится ровно к
+той, под которой нажато. «⏭ Дальше» откладывает текущую до следующего
+захода в раздел.
 """
 from __future__ import annotations
 
@@ -12,7 +14,7 @@ from typing import Any, Mapping
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from app import texts
 from app.config import get_settings
@@ -21,6 +23,7 @@ from app.db import users as users_repo
 from app.handlers import verification as verification_handlers
 from app.handlers.admin import panel
 from app.handlers.admin.filters import IsStaff
+from app.keyboards import inline as kb
 from app.keyboards import reply as rkb
 from app.services import profile as profile_service
 from app.services import screen
@@ -29,6 +32,7 @@ from app.states import AdminPanel
 
 router = Router(name="staff-moderation")
 router.message.filter(IsStaff())
+router.callback_query.filter(IsStaff())
 
 DURATION_RE = re.compile(r"^\s*(\d{1,3})\s*([dhдч])\s+(.*)$", re.I)
 
@@ -75,6 +79,13 @@ async def do_ban(bot: Bot, admin_id: int, target: Mapping[str, Any],
            + (f"\nДо: {until} (UTC)" if until else "\nСрок: бессрочно")
 
 
+def _parts(call: CallbackQuery) -> tuple[str, int]:
+    """adm:<раздел>:<действие>:<номер> -> (действие, номер)."""
+    parts = (call.data or "").split(":")
+    number = parts[3] if len(parts) > 3 else ""
+    return parts[2] if len(parts) > 2 else "", int(number) if number.isdigit() else 0
+
+
 # ──────────────────────────────── Жалобы ────────────────────────────────────
 
 async def show_report(bot: Bot, chat_id: int, state: FSMContext, is_admin: bool,
@@ -91,8 +102,7 @@ async def show_report(bot: Bot, chat_id: int, state: FSMContext, is_admin: bool,
 
     row = rows[0]
     await state.set_state(AdminPanel.report_view)
-    await state.update_data(report_id=row["id"], report_target=row["target_id"],
-                            report_skip=sorted(skipped))
+    await state.update_data(report_skip=sorted(skipped))
     header = (
         (f"{notice}\n\n" if notice else "")
         + f"🚨 <b>Жалоба #{row['id']}</b> · осталось: {len(rows)}\n"
@@ -100,65 +110,63 @@ async def show_report(bot: Bot, chat_id: int, state: FSMContext, is_admin: bool,
         f"Комментарий: {profile_service.esc(row['comment']) if row['comment'] else '—'}\n"
         f"От: {row['created_at']}"
     )
+    markup = kb.report_view(int(row["id"]))
     target = await users_repo.get_user(row["target_id"])
     if target is None:
-        await screen.send(bot, chat_id, state, header + "\n\n<i>Анкета недоступна.</i>",
-                          rkb.REPORT_VIEW)
+        await screen.show(bot, chat_id, state, header + "\n\n<i>Анкета недоступна.</i>",
+                          markup)
         return
+    await screen.prepare(bot, chat_id, state)
     message_ids = await profile_service.send_card(
         bot, chat_id, target, admin_view=True, show_distance=False,
-        header=header, markup=rkb.REPORT_VIEW,
+        header=header, markup=markup,
     )
-    await screen.replace(bot, chat_id, state, message_ids)
+    await screen.remember(state, message_ids)
 
 
-@router.message(F.text.startswith(rkb.A_REPORTS))
-async def list_reports(message: Message, state: FSMContext, is_admin: bool) -> None:
-    await screen.drop(message)
+@router.callback_query(F.data.in_({"adm:reports", "n:reports"}))
+async def list_reports(call: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    await call.answer()
     await state.update_data(report_skip=[])
-    await show_report(message.bot, message.chat.id, state, is_admin)
+    await show_report(call.bot, screen.chat_id(call), state, is_admin)
 
 
-@router.message(AdminPanel.report_view, F.text == rkb.A_BAN)
-async def report_ban(message: Message, state: FSMContext) -> None:
-    await screen.drop(message)
-    target_id = int((await state.get_data()).get("report_target") or 0)
-    await panel.ask_ban_reason(message.bot, message.chat.id, state, target_id, "report")
+@router.callback_query(F.data.startswith("adm:rep:"))
+async def report_action(call: CallbackQuery, state: FSMContext, bot: Bot,
+                        is_admin: bool) -> None:
+    await call.answer()
+    chat_id = screen.chat_id(call)
+    action, report_id = _parts(call)
+    report = await mod_repo.get_report(report_id)
+    if report is None or report["status"] != "open":
+        await show_report(bot, chat_id, state, is_admin, "<i>Эта жалоба уже разобрана</i>")
+        return
+    target_id = int(report["target_id"])
+    admin_id = call.from_user.id
 
-
-@router.message(AdminPanel.report_view, F.text == rkb.A_REQ_VERIFY)
-async def report_request_verify(message: Message, state: FSMContext, bot: Bot,
-                                is_admin: bool) -> None:
-    await screen.drop(message)
-    data = await state.get_data()
-    report_id, target_id = int(data.get("report_id") or 0), int(data.get("report_target") or 0)
-    code = await verification_handlers.request_verification(
-        bot, target_id, forced=True, admin_id=message.from_user.id)
-    if code is None:
-        notice = "🛡 <i>Это владелец бота — проверки на него не действуют</i>"
-    else:
-        await mod_repo.close_report(report_id, message.from_user.id, "done")
-        notice = (f"✅ <i>По жалобе #{report_id} запрошена верификация "
-                  f"<code>{target_id}</code>, код: <code>{code}</code></i>")
-    await show_report(bot, message.chat.id, state, is_admin, notice)
-
-
-@router.message(AdminPanel.report_view, F.text == rkb.A_DECLINE)
-async def report_decline(message: Message, state: FSMContext, is_admin: bool) -> None:
-    await screen.drop(message)
-    report_id = int((await state.get_data()).get("report_id") or 0)
-    await mod_repo.close_report(report_id, message.from_user.id, "declined")
-    await show_report(message.bot, message.chat.id, state, is_admin,
-                      f"👌 <i>Жалоба #{report_id} отклонена</i>")
-
-
-@router.message(AdminPanel.report_view, F.text == rkb.A_NEXT)
-async def report_next(message: Message, state: FSMContext, is_admin: bool) -> None:
-    await screen.drop(message)
-    data = await state.get_data()
-    skipped = set(data.get("report_skip") or []) | {int(data.get("report_id") or 0)}
-    await state.update_data(report_skip=sorted(skipped))
-    await show_report(message.bot, message.chat.id, state, is_admin)
+    if action == "ban":
+        await panel.ask_ban_reason(bot, chat_id, state, target_id, "report")
+        return
+    if action == "next":
+        skipped = set((await state.get_data()).get("report_skip") or []) | {report_id}
+        await state.update_data(report_skip=sorted(skipped))
+        await show_report(bot, chat_id, state, is_admin)
+        return
+    if action == "decline":
+        await mod_repo.close_report(report_id, admin_id, "declined")
+        await show_report(bot, chat_id, state, is_admin,
+                          f"👌 <i>Жалоба #{report_id} отклонена</i>")
+        return
+    if action == "req":
+        code = await verification_handlers.request_verification(
+            bot, target_id, forced=True, admin_id=admin_id)
+        if code is None:
+            notice = "🛡 <i>Это владелец бота — проверки на него не действуют</i>"
+        else:
+            await mod_repo.close_report(report_id, admin_id, "done")
+            notice = (f"✅ <i>По жалобе #{report_id} запрошена верификация "
+                      f"<code>{target_id}</code>, код: <code>{code}</code></i>")
+        await show_report(bot, chat_id, state, is_admin, notice)
 
 
 # ───────────────────────────── Верификация ──────────────────────────────────
@@ -178,8 +186,7 @@ async def show_verification(bot: Bot, chat_id: int, state: FSMContext, is_admin:
 
     row = rows[0]
     await state.set_state(AdminPanel.verify_view)
-    await state.update_data(verify_id=row["id"], verify_user=row["user_id"],
-                            verify_skip=sorted(skipped))
+    await state.update_data(verify_skip=sorted(skipped))
     caption = (
         (f"{notice}\n\n" if notice else "")
         + f"✅ <b>Заявка #{row['id']}</b> · осталось: {len(rows)}\n"
@@ -188,59 +195,68 @@ async def show_verification(bot: Bot, chat_id: int, state: FSMContext, is_admin:
         f"Код на фото должен быть: <code>{row['code']}</code>\n"
         f"Тип: {'запрошена админом' if row['forced'] else 'по своей инициативе'}"
     )
+    markup = kb.verify_view(int(row["id"]))
+    await screen.prepare(bot, chat_id, state)
     sent_ids: list[int] = []
     try:
         if row["media_type"] == "photo":
             sent = await bot.send_photo(chat_id, row["media_id"], caption=caption,
-                                        reply_markup=rkb.VERIFY_VIEW)
+                                        reply_markup=markup)
         elif row["media_type"] == "video":
             sent = await bot.send_video(chat_id, row["media_id"], caption=caption,
-                                        reply_markup=rkb.VERIFY_VIEW)
+                                        reply_markup=markup)
         else:
             circle = await bot.send_video_note(chat_id, row["media_id"])
             sent_ids.append(circle.message_id)
-            sent = await bot.send_message(chat_id, caption, reply_markup=rkb.VERIFY_VIEW)
+            sent = await bot.send_message(chat_id, caption, reply_markup=markup)
     except Exception:
         sent = await bot.send_message(chat_id, caption + "\n\n<i>Медиа недоступно.</i>",
-                                      reply_markup=rkb.VERIFY_VIEW)
-    await screen.replace(bot, chat_id, state, sent_ids + [sent.message_id])
+                                      reply_markup=markup)
+    await screen.remember(state, sent_ids + [sent.message_id])
 
 
-@router.message(F.text.startswith(rkb.A_VERIFY))
-async def list_verifications(message: Message, state: FSMContext, is_admin: bool) -> None:
-    await screen.drop(message)
+@router.callback_query(F.data.in_({"adm:verify", "n:verify"}))
+async def list_verifications(call: CallbackQuery, state: FSMContext,
+                             is_admin: bool) -> None:
+    await call.answer()
     await state.update_data(verify_skip=[])
-    await show_verification(message.bot, message.chat.id, state, is_admin)
+    await show_verification(call.bot, screen.chat_id(call), state, is_admin)
 
 
-@router.message(AdminPanel.verify_view, F.text == rkb.A_APPROVE)
-async def approve_verification(message: Message, state: FSMContext, bot: Bot,
-                               is_admin: bool) -> None:
-    await screen.drop(message)
-    verification_id = int((await state.get_data()).get("verify_id") or 0)
+@router.callback_query(F.data.startswith("adm:ver:"))
+async def verification_action(call: CallbackQuery, state: FSMContext, bot: Bot,
+                              is_admin: bool) -> None:
+    await call.answer()
+    chat_id = screen.chat_id(call)
+    action, verification_id = _parts(call)
     record = await mod_repo.get_verification(verification_id)
     if record is None or record["status"] != "pending":
-        await show_verification(bot, message.chat.id, state, is_admin,
+        await show_verification(bot, chat_id, state, is_admin,
                                 "<i>Заявка уже обработана</i>")
         return
+    user_id = int(record["user_id"])
 
-    await mod_repo.review_verification(verification_id, message.from_user.id, True)
-    await users_repo.mark_verified(record["user_id"])
-    await safe_send(bot, record["user_id"], texts.VERIFY_APPROVED)
-    await admin_log(bot, f"✅ Верификация подтверждена: <code>{record['user_id']}</code> "
-                         f"(админ <code>{message.from_user.id}</code>)")
-    await show_verification(bot, message.chat.id, state, is_admin,
-                            f"✅ <i>Заявка #{verification_id} подтверждена</i>")
-
-
-@router.message(AdminPanel.verify_view, F.text == rkb.A_REJECT)
-async def reject_verification(message: Message, state: FSMContext) -> None:
-    await screen.drop(message)
-    await state.set_state(AdminPanel.verify_reject_reason)
-    await screen.send(message.bot, message.chat.id, state,
-                      "Почему отклоняем? Напишите причину — пользователь её увидит.\n"
-                      "Например: <i>кода не видно на фото</i>",
-                      rkb.CANCEL_ONLY)
+    if action == "ok":
+        await mod_repo.review_verification(verification_id, call.from_user.id, True)
+        await users_repo.mark_verified(user_id)
+        await safe_send(bot, user_id, texts.VERIFY_APPROVED)
+        await admin_log(bot, f"✅ Верификация подтверждена: <code>{user_id}</code> "
+                             f"(админ <code>{call.from_user.id}</code>)")
+        await show_verification(bot, chat_id, state, is_admin,
+                                f"✅ <i>Заявка #{verification_id} подтверждена</i>")
+    elif action == "no":
+        await state.set_state(AdminPanel.verify_reject_reason)
+        await state.update_data(verify_id=verification_id)
+        await screen.show(bot, chat_id, state,
+                          "Почему отклоняем? Напишите причину — пользователь её увидит.\n"
+                          "Например: <i>кода не видно на фото</i>",
+                          kb.REJECT_BACK)
+    elif action == "ban":
+        await panel.ask_ban_reason(bot, chat_id, state, user_id, "verify")
+    elif action == "next":
+        skipped = set((await state.get_data()).get("verify_skip") or []) | {verification_id}
+        await state.update_data(verify_skip=sorted(skipped))
+        await show_verification(bot, chat_id, state, is_admin)
 
 
 @router.message(AdminPanel.verify_reject_reason, F.text)
@@ -248,13 +264,10 @@ async def reject_reason(message: Message, state: FSMContext, bot: Bot,
                         is_admin: bool) -> None:
     await screen.drop(message)
     chat_id = message.chat.id
-    if message.text == rkb.CANCEL:
-        await show_verification(bot, chat_id, state, is_admin)
-        return
     verification_id = int((await state.get_data()).get("verify_id") or 0)
     record = await mod_repo.get_verification(verification_id)
-    if record is None:
-        await show_verification(bot, chat_id, state, is_admin, "<i>Заявка не найдена</i>")
+    if record is None or record["status"] != "pending":
+        await show_verification(bot, chat_id, state, is_admin, "<i>Заявка уже обработана</i>")
         return
 
     reason = (message.text or "").strip()
@@ -262,28 +275,12 @@ async def reject_reason(message: Message, state: FSMContext, bot: Bot,
     await users_repo.update_user(record["user_id"], verify_status="rejected")
     if record["forced"]:
         await safe_send(bot, record["user_id"], texts.VERIFY_REJECTED_FORCED.format(
-            reason=profile_service.esc(reason)), rkb.VERIFY_REQUIRED)
+            reason=profile_service.esc(reason)), kb.VERIFY_REQUIRED)
     else:
         await safe_send(bot, record["user_id"], texts.VERIFY_REJECTED.format(
             reason=profile_service.esc(reason)))
     await show_verification(bot, chat_id, state, is_admin,
                             f"❌ <i>Заявка #{verification_id} отклонена</i>")
-
-
-@router.message(AdminPanel.verify_view, F.text == rkb.A_BAN)
-async def verification_ban(message: Message, state: FSMContext) -> None:
-    await screen.drop(message)
-    user_id = int((await state.get_data()).get("verify_user") or 0)
-    await panel.ask_ban_reason(message.bot, message.chat.id, state, user_id, "verify")
-
-
-@router.message(AdminPanel.verify_view, F.text == rkb.A_NEXT)
-async def verification_next(message: Message, state: FSMContext, is_admin: bool) -> None:
-    await screen.drop(message)
-    data = await state.get_data()
-    skipped = set(data.get("verify_skip") or []) | {int(data.get("verify_id") or 0)}
-    await state.update_data(verify_skip=sorted(skipped))
-    await show_verification(message.bot, message.chat.id, state, is_admin)
 
 
 # ──────────────────────────────── Бан ───────────────────────────────────────
@@ -315,18 +312,21 @@ async def ban_apply(message: Message, state: FSMContext, bot: Bot,
         await panel.open_panel(bot, chat_id, state, is_admin, result)
 
 
-async def _ask_target(message: Message, state: FSMContext, new_state, question: str,
-                      error: str | None = None) -> None:
+async def _ask_target(bot: Bot, chat_id: int, state: FSMContext, new_state,
+                      question: str, error: str | None = None) -> None:
     await state.set_state(new_state)
-    await screen.send(message.bot, message.chat.id, state,
-                      f"⚠️ {error}\n\n{question}" if error else question, rkb.ADMIN_BACK)
+    await screen.show(bot, chat_id, state,
+                      f"⚠️ {error}\n\n{question}" if error else question, kb.ADMIN_BACK)
 
 
-@router.message(F.text == rkb.A_BAN)
-async def ask_ban_user(message: Message, state: FSMContext) -> None:
-    await screen.drop(message)
-    await _ask_target(message, state, AdminPanel.ban_user,
-                      "🚫 Кого банить? Пришлите ID или @username:")
+BAN_WHO = "🚫 Кого банить? Пришлите ID или @username:"
+UNBAN_WHO = "✅ Кого разбанить? Пришлите ID или @username:"
+
+
+@router.callback_query(F.data == "adm:ban")
+async def ask_ban_user(call: CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    await _ask_target(call.bot, screen.chat_id(call), state, AdminPanel.ban_user, BAN_WHO)
 
 
 @router.message(AdminPanel.ban_user, F.text)
@@ -334,18 +334,17 @@ async def ban_pick_user(message: Message, state: FSMContext) -> None:
     await screen.drop(message)
     target = await users_repo.find_user(message.text or "")
     if target is None:
-        await _ask_target(message, state, AdminPanel.ban_user,
-                          "🚫 Кого банить? Пришлите ID или @username:",
-                          "Пользователь не найден.")
+        await _ask_target(message.bot, message.chat.id, state, AdminPanel.ban_user,
+                          BAN_WHO, "Пользователь не найден.")
         return
     await panel.ask_ban_reason(message.bot, message.chat.id, state, target["id"], "panel")
 
 
-@router.message(F.text == rkb.A_UNBAN)
-async def ask_unban(message: Message, state: FSMContext) -> None:
-    await screen.drop(message)
-    await _ask_target(message, state, AdminPanel.unban_user,
-                      "✅ Кого разбанить? Пришлите ID или @username:")
+@router.callback_query(F.data == "adm:unban")
+async def ask_unban(call: CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    await _ask_target(call.bot, screen.chat_id(call), state, AdminPanel.unban_user,
+                      UNBAN_WHO)
 
 
 @router.message(AdminPanel.unban_user, F.text)
@@ -354,9 +353,8 @@ async def unban_apply(message: Message, state: FSMContext, bot: Bot,
     await screen.drop(message)
     target = await users_repo.find_user(message.text or "")
     if target is None:
-        await _ask_target(message, state, AdminPanel.unban_user,
-                          "✅ Кого разбанить? Пришлите ID или @username:",
-                          "Пользователь не найден.")
+        await _ask_target(bot, message.chat.id, state, AdminPanel.unban_user,
+                          UNBAN_WHO, "Пользователь не найден.")
         return
     await panel.unban(bot, message.from_user.id, target["id"])
     await panel.open_panel(bot, message.chat.id, state, is_admin,

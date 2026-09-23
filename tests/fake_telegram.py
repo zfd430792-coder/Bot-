@@ -33,6 +33,15 @@ class FakeSession(BaseSession):
         self.keyboards: dict[int, list[str] | None] = {}
         # Все inline-кнопки, какие бот когда-либо показывал: (callback_data, url)
         self.inline_buttons: list[tuple[str | None, str | None]] = []
+        # Inline-кнопки последнего показанного или исправленного сообщения в чате:
+        # [(надпись, callback_data)]. Сообщение без кнопок — пустой список
+        self.inline: dict[int, list[tuple[str, str | None]]] = {}
+        # Все надписи нижних клавиатур за прогон — clear() их не сбрасывает
+        self.reply_buttons: set[str] = set()
+        # Кнопки каждого сообщения: (чат, id) -> [(надпись, data)]
+        self.by_message: dict[tuple[int, int], list[tuple[str, str | None]]] = {}
+        # Отправленные сообщения: (метод, id) — чтобы нажать кнопку именно на нём
+        self.sent: list[tuple[TelegramMethod, int]] = []
 
     async def close(self) -> None:
         return None
@@ -45,16 +54,36 @@ class FakeSession(BaseSession):
         """Надписи нижней клавиатуры, которая сейчас у человека."""
         return list(self.keyboards.get(chat_id) or [])
 
+    def buttons(self, chat_id: int) -> list[tuple[str, str | None]]:
+        """Inline-кнопки последнего сообщения бота в чате: (надпись, data)."""
+        return list(self.inline.get(chat_id) or [])
+
     def _track_markup(self, method: TelegramMethod) -> None:
         markup = getattr(method, "reply_markup", None)
         chat_id = getattr(method, "chat_id", None)
+        name = type(method).__name__
         if isinstance(markup, ReplyKeyboardMarkup) and chat_id is not None:
             self.keyboards[int(chat_id)] = [b.text for row in markup.keyboard for b in row]
+            self.reply_buttons.update(self.keyboards[int(chat_id)])
         elif isinstance(markup, ReplyKeyboardRemove) and chat_id is not None:
             self.keyboards[int(chat_id)] = None
         elif isinstance(markup, InlineKeyboardMarkup):
             self.inline_buttons += [(b.callback_data, b.url)
                                     for row in markup.inline_keyboard for b in row]
+        # Служебное «⌛️» со снятием нижней клавиатуры — не экран
+        if (chat_id is not None and name.startswith(("Send", "Edit", "CopyMessage"))
+                and not isinstance(markup, ReplyKeyboardRemove)):
+            self.inline[int(chat_id)] = self._inline_of(markup)
+        # Правка сообщения заменяет и его кнопки (правка без кнопок — убирает их)
+        message_id = getattr(method, "message_id", None)
+        if name.startswith("Edit") and chat_id is not None and message_id is not None:
+            self.by_message[(int(chat_id), int(message_id))] = self._inline_of(markup)
+
+    @staticmethod
+    def _inline_of(markup) -> list[tuple[str, str | None]]:
+        if isinstance(markup, InlineKeyboardMarkup):
+            return [(b.text, b.callback_data) for row in markup.inline_keyboard for b in row]
+        return []
 
     async def stream_content(self, url: str, headers=None, timeout: int = 30,
                              chunk_size: int = 65536,
@@ -72,6 +101,8 @@ class FakeSession(BaseSession):
         if name == "CopyMessage":
             message_id = next(_ids)
             self.alive.setdefault(int(method.chat_id), set()).add(message_id)
+            self.by_message[(int(method.chat_id), message_id)] = self._inline_of(
+                method.reply_markup)
             return MessageId(message_id=message_id)
         if name == "DeleteMessage":
             self.alive.get(int(method.chat_id), set()).discard(method.message_id)
@@ -80,6 +111,9 @@ class FakeSession(BaseSession):
             chat_id = int(getattr(method, "chat_id", 1))
             message_id = next(_ids)
             self.alive.setdefault(chat_id, set()).add(message_id)
+            self.sent.append((method, message_id))
+            self.by_message[(chat_id, message_id)] = self._inline_of(
+                getattr(method, "reply_markup", None))
             return Message(
                 message_id=message_id,
                 date=dt.datetime.now(dt.timezone.utc),

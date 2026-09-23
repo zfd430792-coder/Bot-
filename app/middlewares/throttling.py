@@ -11,8 +11,9 @@ from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from app.config import get_settings
 
-# Нажатия, которые намеренно делают быстро подряд: номера клеток капчи и
-# кнопки ленты. Нижние кнопки приходят обычными сообщениями — узнаём по тексту.
+# Нажатия, которые намеренно делают быстро подряд: клетки капчи и кнопки ленты
+FAST_CALLBACKS = ("cap:tok:", "br:like:", "br:dislike:")
+# То же с нижней клавиатуры прежней версии — она приходит обычным текстом
 FAST_TEXTS = re.compile(r"^(\d{1,2}|❤️(\s*\d+)?|👎|✅ Готово)$")
 
 
@@ -37,7 +38,9 @@ class ThrottlingMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         limit = self.rate
-        if isinstance(event, Message) and FAST_TEXTS.match(event.text or ""):
+        if isinstance(event, CallbackQuery) and (event.data or "").startswith(FAST_CALLBACKS):
+            limit = self.fast_rate
+        elif isinstance(event, Message) and FAST_TEXTS.match(event.text or ""):
             limit = self.fast_rate
 
         now = time.monotonic()
