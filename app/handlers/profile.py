@@ -17,6 +17,7 @@ from aiogram.types import CallbackQuery, Message
 
 from app import texts
 from app.config import Settings
+from app.db import moderation as mod_repo
 from app.db import users as users_repo
 from app.handlers import registration
 from app.handlers.registration import LINK_RE
@@ -39,12 +40,18 @@ async def show_profile(bot: Bot, chat_id: int, state: FSMContext, user_id: int,
                           kb.START_AGAIN)
         return
 
+    verify_status = user["verify_status"]
+    if verify_status == "pending" and not await mod_repo.awaiting_review(user_id):
+        # Прежняя версия ставила «на проверке» уже при нажатии «Пройти
+        # верификацию» — кто так и не прислал проверку, может начать снова
+        verify_status = "none"
+
     status = []
     if not user["is_active"]:
         status.append("🙈 скрыта из поиска")
-    if user["verify_status"] == "verified":
+    if verify_status == "verified":
         status.append(f"{texts.VERIFY_BADGE} верифицирована")
-    elif user["verify_status"] == "pending":
+    elif verify_status == "pending":
         status.append("⏳ верификация на проверке")
     header = texts.MY_PROFILE
     if status:
@@ -55,7 +62,7 @@ async def show_profile(bot: Bot, chat_id: int, state: FSMContext, user_id: int,
     await screen.prepare(bot, chat_id, state)
     message_ids = await profile_service.send_card(
         bot, chat_id, user, show_distance=False, header=header,
-        markup=kb.profile_actions(bool(user["is_active"]), user["verify_status"]),
+        markup=kb.profile_actions(bool(user["is_active"]), verify_status),
     )
     await screen.remember(state, message_ids)
 

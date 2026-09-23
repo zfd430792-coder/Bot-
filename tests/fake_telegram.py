@@ -204,6 +204,27 @@ def video_update(bot: Bot, user_id: int, duration: int) -> Update:
     return Update.model_validate(raw, context={"bot": bot})
 
 
+def video_note_update(bot: Bot, user_id: int, duration: int, *,
+                      forwarded: bool = False, file_id: str | None = None,
+                      username: str | None = "tester") -> Update:
+    """Кружок. forwarded — переслан из другого чата, а не записан сейчас."""
+    now = int(dt.datetime.now().timestamp())
+    message = {
+        "message_id": next(_message_ids),
+        "date": now,
+        "chat": {"id": user_id, "type": "private"},
+        "from": _user(user_id, username, "Тест"),
+        "video_note": {"file_id": file_id or f"circle-{user_id}-{next(_ids)}",
+                       "file_unique_id": f"c{user_id}", "length": 384,
+                       "duration": duration},
+    }
+    if forwarded:
+        message["forward_origin"] = {"type": "user", "date": now,
+                                     "sender_user": _user(777, "someone", "Кто-то")}
+    raw = {"update_id": next(_update_ids), "message": message}
+    return Update.model_validate(raw, context={"bot": bot})
+
+
 def location_update(bot: Bot, user_id: int, lat: float, lon: float) -> Update:
     raw = {
         "update_id": next(_update_ids),

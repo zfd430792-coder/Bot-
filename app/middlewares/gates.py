@@ -101,11 +101,7 @@ class AccessGateMiddleware(BaseMiddleware):
             if user["verify_status"] == "pending":
                 await _reply(event, data, texts.VERIFY_PENDING)
             else:
-                await _reply(
-                    event, data,
-                    texts.VERIFY_REQUIRED.format(code=user["verify_code"] or "—"),
-                    kb.VERIFY_REQUIRED,
-                )
+                await _reply(event, data, texts.VERIFY_REQUIRED, kb.VERIFY_REQUIRED)
             return None
 
         return await handler(event, data)

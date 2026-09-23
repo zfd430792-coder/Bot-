@@ -113,7 +113,9 @@ CREATE TABLE IF NOT EXISTS reports (
 CREATE TABLE IF NOT EXISTS verifications (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id     INTEGER NOT NULL,
-    code        TEXT NOT NULL,
+    code        TEXT NOT NULL,                   -- '' — задание ещё не выдано
+    action      TEXT,                            -- что сделать в кружке (texts.VERIFY_ACTIONS)
+    issued_at   TEXT,                            -- когда показано задание: код живёт 10 минут
     media_type  TEXT,
     media_id    TEXT,
     status      TEXT NOT NULL DEFAULT 'pending', -- pending | approved | rejected
@@ -258,6 +260,10 @@ MIGRATIONS: dict[str, dict[str, str]] = {
     },
     "captcha_state": {
         "blocks": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "verifications": {
+        "action": "TEXT",
+        "issued_at": "TEXT",
     },
 }
 

@@ -64,6 +64,7 @@ class AdminPanel(StatesGroup):
     broadcast_confirm = State()
     bot_settings = State()
     setting_value = State()
+    verify_example = State()     # ждём кружок-пример для верификации
     message_user = State()
     staff_list = State()
     staff_add = State()

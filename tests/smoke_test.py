@@ -53,6 +53,7 @@ from app.db import moderation as mod_repo                              # noqa: E
 from app.db import reactions as reactions_repo                         # noqa: E402
 from app.db import users as users_repo                                 # noqa: E402
 from app.db.database import db                                         # noqa: E402
+from app.handlers import verification as verification_handlers         # noqa: E402
 from app.keyboards import reply as rkb                                 # noqa: E402
 from app.services import antifraud, reengagement, screen               # noqa: E402
 from app.services import captcha as captcha_service                    # noqa: E402
@@ -60,7 +61,7 @@ from app.services import profile as profile_service                    # noqa: E
 from main import build_storage                                         # noqa: E402
 from tests.fake_telegram import (                                      # noqa: E402
     FakeSession, callback_update, location_update, message_update,
-    photo_update, video_update,
+    photo_update, video_note_update, video_update,
 )
 
 ALICE, BOB, CAROL, ADMIN = 100001, 100002, 100003, 900001
@@ -71,7 +72,7 @@ SCREEN = 100013
 RESTART, NEWBIE, CAPTCHA_LOOK = 100014, 100015, 100016
 M_SAMARA, M_REGION, F_SAMARA, F_REGION, F_TLT, F_MSK, F_LEGACY = range(100020, 100027)
 VIEWER, AGE_VIEWER, AGE_28, AGE_29, AGE_32, AGE_33 = range(100030, 100036)
-SNEAKY, RETURNING = 100040, 100041
+SNEAKY, RETURNING, VERA = 100040, 100041, 100042
 EXTRAS = list(range(200001, 200009))        # массовка для ленты
 
 passed = failed = 0
@@ -553,18 +554,18 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     h.clear()
 
     # ── 10. Верификация по требованию админа ────────────────────────────────
-    section("10. Принудительная верификация")
+    section("10. Принудительная верификация кружком")
     await h.text(ADMIN, f"/find {CAROL}", username="boss")
     await h.act(ADMIN, "adm:card:req:", username="boss")
     user = await users_repo.get_user(CAROL)
     check(user["verify_forced"] == 1, "требование верификации выставлено")
-    code = user["verify_code"]
+    check(h.said("запишет кружок"), "админ видит, что человек запишет кружок")
     h.clear()
 
     await h.click(CAROL, "m:search")
     check(h.said("Требуется верификация"), "до проверки бот закрыт")
-    check(h.said(code), "пользователю показан код для фото")
-    check(h.data(CAROL) == ["ver:send"], "отправить фото — кнопкой")
+    check(h.said("кружок"), "пользователю объяснено, что нужен кружок")
+    check(h.data(CAROL) == ["ver:send"], "записать кружок — кнопкой")
     h.clear()
 
     await make_profile(VIEWER, gender="m", name="Зритель", age=28)
@@ -573,16 +574,67 @@ async def scenarios(h: "Harness", settings, storage) -> int:
           "анкета на проверке скрыта из поиска")
 
     await h.click(CAROL, "ver:send")
+    task = await mod_repo.current_verification(CAROL)
+    code = task["code"]
+    check(len(code) == 4 and code.isdigit(), "код — четыре цифры: их легко назвать вслух")
+    check(task["action"] in texts.VERIFY_ACTIONS, "к коду выдано случайное действие")
+    check(h.said(f"<b>{' '.join(code)}</b>")
+          and h.said(texts.VERIFY_ACTIONS[task["action"]]),
+          "на экране задание: код и действие")
+    check(h.said("10 минут"), "сказано, сколько действует задание")
+    check(not h.session.of_type("SendVideoNote"), "пример не загружен — задание без него")
+    h.clear()
+
     await h.photo(CAROL)
-    check(h.said("Заявка отправлена"), "фото проверки принято")
+    check(h.said("Нужен именно кружок"), "фото не принимается")
+    h.clear()
+    await h.feed(video_update(h.bot, CAROL, 5))
+    check(h.said("Нужен именно кружок"), "обычное видео не принимается")
+    h.clear()
+    await h.feed(video_note_update(h.bot, CAROL, 6, forwarded=True))
+    check(h.said("Пересланный кружок"), "пересланный кружок не принимается")
+    h.clear()
+    await h.feed(video_note_update(h.bot, CAROL, 1))
+    check(h.said("слишком короткий"), "слишком короткий кружок не принимается")
+    h.clear()
+    await h.feed(video_note_update(h.bot, CAROL, 45))
+    check(h.said("длиннее 20 секунд"), "слишком длинный кружок не принимается")
+    check(not await mod_repo.awaiting_review(CAROL), "ничего из этого не ушло админу")
+    check((await mod_repo.current_verification(CAROL))["code"] == code,
+          "пока время не вышло, код прежний")
+    h.clear()
+
+    await db.execute(
+        "UPDATE verifications SET issued_at = datetime('now', '-11 minutes') "
+        "WHERE user_id = ? AND status = 'pending'", (CAROL,)
+    )
+    await h.feed(video_note_update(h.bot, CAROL, 6))
+    check(h.said("Время на запись вышло"), "кружок после 10 минут не принят")
+    check(not await mod_repo.awaiting_review(CAROL), "просроченный кружок админу не ушёл")
+    task = await mod_repo.current_verification(CAROL)
+    check(task["task_age"] is not None and task["task_age"] < 60, "выдано новое задание")
+    check(h.said(f"<b>{' '.join(task['code'])}</b>"), "новый код на экране")
+    h.clear()
+
+    await h.feed(video_note_update(h.bot, CAROL, 6))
+    check(h.said("Кружок отправлен"), "кружок принят")
     verifications = await mod_repo.pending_verifications()
     check(len(verifications) == 1, "заявка ждёт админа")
     check(any(markup_data(c) == ["n:verify"] for c in h.to(ADMIN)),
           "админу пришла заявка с кнопкой «Проверить»")
+    check(any(type(c).__name__ == "SendVideoNote" for c in h.to(ADMIN)),
+          "админу пришёл сам кружок")
     h.clear()
 
     await h.click(ADMIN, "adm:verify", username="boss")
-    check(h.said("Заявка #"), "заявка открывается с фото")
+    check(h.said("Заявка #") and h.said("Карина"), "заявка открывается вместе с анкетой")
+    check(h.said(f"код <b>{' '.join(task['code'])}</b> вслух")
+          and h.said(texts.VERIFY_ACTIONS[task["action"]]),
+          "админ видит, что должно быть в кружке")
+    names = h.session.method_names()
+    check("SendPhoto" in names and "SendVideoNote" in names
+          and names.index("SendPhoto") < names.index("SendVideoNote"),
+          "сначала анкета с фото, потом кружок — лицо легко сверить")
     await h.act(ADMIN, "adm:ver:ok:", username="boss")
     user = await users_repo.get_user(CAROL)
     check(user["verify_status"] == "verified", "верификация подтверждена")
@@ -1495,6 +1547,122 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     check(requested is None, "без анкеты заявку на верификацию не создать")
     await h.click(SNEAKY, "adm:stats", username="sneaky")
     check(not h.said("Статистика бота"), "в админку без прав не пройти")
+    h.clear()
+
+    # ── 30. Верификация по желанию ──────────────────────────────────────────
+    section("30. Верификация кружком: пример, отмена и отказ")
+    digits = iter("12345678")
+    choice = verification_handlers.secrets.choice
+    verification_handlers.secrets.choice = lambda seq: next(digits)
+    try:
+        check(verification_handlers.new_code() == "5678",
+              "код из примера (1 2 3 4) настоящим не выдаётся")
+    finally:
+        verification_handlers.secrets.choice = choice
+
+    await make_profile(VERA, gender="f", name="Вера")
+    h.clear()
+    await h.click(ADMIN, "adm:config", username="boss")
+    check("adm:cfg:example" in h.data(ADMIN), "в настройках есть пример верификации")
+    await h.click(ADMIN, "adm:cfg:example", username="boss")
+    check(h.said("Мой код — 1 2 3 4"), "владельцу подсказано, что снять в примере")
+    await h.feed(photo_update(h.bot, ADMIN, username="boss"))
+    check(h.said("Нужен именно кружок"), "пример — только кружок")
+    await h.feed(video_note_update(h.bot, ADMIN, 6, forwarded=True,
+                                   file_id="example-circle", username="boss"))
+    check(await mod_repo.verify_example() == "example-circle",
+          "пересланный кружок сохранён как пример")
+    check(h.said("Пример сохранён"), "владелец видит, что пример сохранён")
+    h.clear()
+
+    await h.click(VERA, "m:profile")
+    await h.act(VERA, "ver:self")
+    check(h.said("Верификация анкеты") and h.data(VERA) == ["ver:send", "pr:back"],
+          "сначала объяснение и кнопка «Записать кружок»")
+    h.clear()
+    await h.click(VERA, "ver:send")
+    names = h.session.method_names()
+    check("SendVideoNote" in names and names.index("SendVideoNote") < names.index("SendMessage"),
+          "над заданием — кружок-пример")
+    check(h.session.last("SendVideoNote").video_note == "example-circle",
+          "показан загруженный пример")
+    check(h.said("Код в нём 1 2 3 4, у вас будет свой"), "под примером — что код у всех свой")
+    h.clear()
+    await h.click(VERA, "ver:cancel")
+    check("ver:self" in h.data(VERA), "после отмены кнопка «Пройти верификацию» на месте")
+    check((await users_repo.get_user(VERA))["verify_status"] == "none",
+          "статус не меняется, пока кружок не прислан")
+    h.clear()
+
+    await h.act(VERA, "ver:self")
+    await h.click(VERA, "ver:send")
+    await h.feed(video_note_update(h.bot, VERA, 7))
+    check(h.said("Кружок отправлен"), "кружок принят")
+    h.clear()
+    await h.click(VERA, "m:profile")
+    check(h.said("на проверке") and "ver:self" not in h.data(VERA),
+          "в анкете видно, что заявка на проверке")
+    await h.click(VERA, "ver:send")
+    check(h.said("Заявка на проверке"), "второй кружок поверх первого не записать")
+    h.clear()
+
+    await h.click(ADMIN, "adm:verify", username="boss")
+    record = await mod_repo.current_verification(VERA)
+    await h.act(ADMIN, "adm:ver:no:", username="boss")
+    check(f"adm:vrj:person:{record['id']}" in h.data(ADMIN),
+          "готовые причины отказа — кнопками")
+    await h.click(ADMIN, f"adm:vrj:person:{record['id']}", username="boss")
+    record = await mod_repo.get_verification(record["id"])
+    reason = texts.VERIFY_REJECT_REASONS["person"][1]
+    check(record["status"] == "rejected" and record["review_note"] == reason,
+          "заявка отклонена с выбранной причиной")
+    check(any(reason in (getattr(c, "text", None) or "") for c in h.to(VERA)),
+          "человеку пришла причина отказа")
+    check((await users_repo.get_user(VERA))["verify_status"] == "rejected",
+          "статус — отклонена")
+    h.clear()
+    await h.click(VERA, "m:profile")
+    check("ver:self" in h.data(VERA), "после отказа можно пройти заново")
+    h.clear()
+
+    await h.act(VERA, "ver:self")
+    await h.click(VERA, "ver:send")
+    await h.feed(video_note_update(h.bot, VERA, 7))
+    h.clear()
+    await h.click(ADMIN, "adm:verify", username="boss")
+    await h.act(ADMIN, "adm:ver:no:", username="boss")
+    await h.text(ADMIN, "темно, лица не разобрать", username="boss")
+    check(any("темно, лица не разобрать" in (getattr(c, "text", None) or "")
+              for c in h.to(VERA)), "свою причину админ пишет текстом")
+    h.clear()
+
+    await h.click(ADMIN, "adm:config", username="boss")
+    await h.click(ADMIN, "adm:cfg:example", username="boss")
+    check("adm:cfg:example:del" in h.data(ADMIN), "пример можно убрать")
+    await h.click(ADMIN, "adm:cfg:example:del", username="boss")
+    check(await mod_repo.verify_example() == "", "пример убран")
+    h.clear()
+    await h.click(VERA, "ver:send")
+    check(not h.session.of_type("SendVideoNote") and h.said("Запишите кружок"),
+          "без примера — одно задание")
+    await h.click(VERA, "ver:cancel")
+    h.clear()
+
+    # Заявка прежней версии — фото с кодом на листе — разбирается как раньше
+    await db.execute(
+        "INSERT INTO verifications (user_id, code, media_type, media_id) "
+        "VALUES (?, 'K7M2', 'photo', 'old-photo')", (VERA,)
+    )
+    await h.click(ADMIN, "adm:verify", username="boss")
+    check(h.said("Код на фото должен быть: <code>K7M2</code>")
+          and any(c.photo == "old-photo" for c in h.session.of_type("SendPhoto")),
+          "заявка прежней версии с фото открывается у админа")
+    await h.act(ADMIN, "adm:ver:ok:", username="boss")
+    check((await users_repo.get_user(VERA))["verify_status"] == "verified",
+          "и подтверждается как раньше")
+    callbacks = {data for data, url in h.session.inline_buttons if data}
+    check(all(len(data.encode()) <= 64 for data in callbacks),
+          "callback_data верификации укладываются в лимит Telegram")
     h.clear()
 
     print(f"\n\033[1mИтог: {passed} успешно, {failed} с ошибкой\033[0m")

@@ -180,10 +180,10 @@ EDIT_CANCEL = _kb([[_btn("⬅️ Отмена", "pr:back")]])
 # ─────────────────────────── Верификация ────────────────────────────────────
 
 VERIFY_SELF = _kb([
-    [_btn("📸 Отправить фото с кодом", "ver:send")],
+    [_btn("🎥 Записать кружок", "ver:send")],
     [_btn("⬅️ К анкете", "pr:back")],
 ])
-VERIFY_REQUIRED = _kb([[_btn("📸 Отправить фото с кодом", "ver:send")]])
+VERIFY_REQUIRED = _kb([[_btn("🎥 Записать кружок", "ver:send")]])
 VERIFY_CANCEL = _kb([[_btn("⬅️ Отмена", "ver:cancel")]])
 
 
@@ -268,6 +268,15 @@ def verify_view(verification_id: int) -> InlineKeyboardMarkup:
     ])
 
 
+def verify_reject(verification_id: int,
+                  reasons: Mapping[str, tuple[str, str]]) -> InlineKeyboardMarkup:
+    """Готовые причины отказа; свою админ просто пишет сообщением."""
+    buttons = [_btn(title, f"adm:vrj:{key}:{verification_id}")
+               for key, (title, _) in reasons.items()]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    return _kb(rows + [[_btn("⬅️ Отмена", "adm:verify")]])
+
+
 BROADCAST_AUDIENCE = _kb(
     [[_btn(title, f"adm:bc:{key}") for title, key in AUDIENCES[i:i + 2]]
      for i in range(0, len(AUDIENCES), 2)] + [[_btn("⬅️ В админку", "adm:home")]]
@@ -300,7 +309,6 @@ def ad_view(ad_id: int, is_active: bool) -> InlineKeyboardMarkup:
 
 ADS_BACK = _kb([[_btn("⬅️ К списку", "adm:ads")]])
 STAFF_BACK = _kb([[_btn("⬅️ К модераторам", "adm:staff")]])
-REJECT_BACK = _kb([[_btn("⬅️ Отмена", "adm:verify")]])
 
 
 def staff_list(moderators: Sequence[Mapping]) -> InlineKeyboardMarkup:
@@ -317,12 +325,19 @@ CONFIG_BACK = _kb([[_btn("⬅️ К настройкам", "adm:config")]])
 
 
 def bot_settings(likes_limit: int, registration_open: bool,
-                 support: str) -> InlineKeyboardMarkup:
+                 support: str, has_example: bool) -> InlineKeyboardMarkup:
     return _kb([
         [_btn(f"❤️ Лимит лайков: {likes_limit}", "adm:cfg:likes")],
         [_btn(f"💬 Контакт поддержки: @{support}" if support
               else "💬 Контакт поддержки: не указан", "adm:cfg:support")],
+        [_btn("🎥 Пример верификации: загружен" if has_example
+              else "🎥 Пример верификации: нет", "adm:cfg:example")],
         [_btn("🟢 Регистрация открыта" if registration_open
               else "🔴 Регистрация закрыта", "adm:cfg:reg")],
         [_btn("⬅️ В админку", "adm:home")],
     ])
+
+
+def verify_example(has_example: bool) -> InlineKeyboardMarkup:
+    rows = [[_btn("🗑 Убрать пример", "adm:cfg:example:del")]] if has_example else []
+    return _kb(rows + [[_btn("⬅️ К настройкам", "adm:config")]])

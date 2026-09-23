@@ -34,8 +34,9 @@ def check(condition: bool, label: str) -> None:
 def make_old_database() -> Path:
     """Схема без колонок, добавленных после первого релиза."""
     old = SCHEMA
-    for column in MIGRATIONS["users"]:
-        old = re.sub(rf"^\s*{column}\s+[^\n]*\n", "", old, flags=re.M)
+    for columns in MIGRATIONS.values():
+        for column in columns:
+            old = re.sub(rf"^\s*{column}\s+[^\n]*\n", "", old, flags=re.M)
 
     path = Path(tempfile.mkdtemp()) / "old.db"
     con = sqlite3.connect(path)
@@ -43,6 +44,11 @@ def make_old_database() -> Path:
     con.execute(
         "INSERT INTO users (id, username, name, age, registered) "
         "VALUES (1, 'oldie', 'Старожил', 30, 1)"
+    )
+    # Заявка прежней версии: фото с кодом на листе, ждёт администратора
+    con.execute(
+        "INSERT INTO verifications (user_id, code, media_type, media_id) "
+        "VALUES (1, 'K7M2', 'photo', 'old-photo')"
     )
     con.commit()
     con.close()
@@ -62,6 +68,15 @@ async def main() -> int:
           "старые данные не пострадали")
     check(row["notify_enabled"] == 1, "у новых колонок проставлены значения по умолчанию")
     check(row["af_strikes"] == 0, "счётчики антинакрутки обнулены")
+
+    for table, added in MIGRATIONS.items():
+        async with db.conn.execute(f"PRAGMA table_info({table})") as cur:
+            existing = {r[1] for r in await cur.fetchall()}
+        check(set(added) <= existing, f"в {table} добавлены новые колонки")
+    old_request = await db.fetchone("SELECT * FROM verifications WHERE user_id = 1")
+    check(old_request["code"] == "K7M2" and old_request["media_id"] == "old-photo"
+          and old_request["action"] is None,
+          "заявка на верификацию прежней версии сохранилась")
 
     indexes = await db.fetchall(
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%'"

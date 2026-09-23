@@ -10,6 +10,7 @@ import re
 from typing import Any, Mapping
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -53,6 +54,16 @@ SUPPORT_ASK = (
     "«💬 Поддержка» появится в меню у всех, а в сообщении о бане — этот контакт.\n\n"
     "<i>Убрать кнопку — отправьте «-».</i>"
 )
+EXAMPLE_ASK = (
+    "🎥 <b>Пример верификации</b>\n\n"
+    "Пришлите кружок — его увидит каждый, кто проходит проверку, прямо над "
+    "своим заданием. Можно переслать кружок из другого чата.\n\n"
+    "<b>Что в нём должно быть</b> (5–7 секунд):\n"
+    "<blockquote>Лицо хорошо видно, человек говорит: «Мой код — {code}» — и "
+    "показывает три пальца.</blockquote>\n"
+    "Код {code} настоящим никому не выдаётся, так что сам пример проверку не пройдёт."
+)
+
 # @name, name или ссылка t.me/name. Username в Telegram — от 5 символов
 SUPPORT_RE = re.compile(
     r"^(?:https?://)?(?:t\.me/|telegram\.me/)?@?([A-Za-z][A-Za-z0-9_]{3,31})/?$"
@@ -161,14 +172,13 @@ async def card_action(call: CallbackQuery, state: FSMContext, bot: Bot,
         await unban(bot, admin_id, target_id)
         notice = "✅ <i>Бан снят</i>"
     elif action == "req":
-        code = await verification_handlers.request_verification(
-            bot, target_id, forced=True, admin_id=admin_id)
-        if code is None:
+        if not await verification_handlers.request_verification(
+                bot, target_id, forced=True, admin_id=admin_id):
             notice = "🛡 <i>Это владелец бота — проверки на него не действуют</i>"
         else:
             await admin_log(bot, f"✅ Запрошена верификация: <code>{target_id}</code> "
                                  f"(админ <code>{admin_id}</code>)")
-            notice = (f"✅ <i>Верификация запрошена, код на фото: <code>{code}</code>. "
+            notice = ("✅ <i>Верификация запрошена: человек запишет кружок с кодом. "
                       "До проверки бот для него закрыт.</i>")
     elif action == "drop":
         await users_repo.update_user(target_id, verify_forced=0, verify_status="none",
@@ -287,17 +297,19 @@ async def show_config(bot: Bot, chat_id: int, state: FSMContext, settings: Setti
     likes = await mod_repo.get_int_setting("likes_limit", settings.likes_limit_per_day)
     reg_open = await mod_repo.get_setting("registration_open", "1") == "1"
     support = await mod_repo.support_username()
+    example = bool(await mod_repo.verify_example())
     text = (
         "⚙️ <b>Настройки бота</b>\n\n"
         f"❤️ Лимит лайков в сутки: <b>{likes}</b>\n"
         f"💬 Поддержка: <b>{'@' + support if support else 'не указана'}</b>\n"
+        f"🎥 Пример верификации: <b>{'загружен' if example else 'нет'}</b>\n"
         f"📝 Регистрация новых анкет: <b>{'открыта' if reg_open else 'закрыта'}</b>\n\n"
         "<i>Значения применяются сразу и переживают перезапуск. Нажмите на "
         "настройку, чтобы изменить её.</i>"
     )
     await state.set_state(AdminPanel.bot_settings)
     await screen.show(bot, chat_id, state, f"{notice}\n\n{text}" if notice else text,
-                      kb.bot_settings(likes, reg_open, support))
+                      kb.bot_settings(likes, reg_open, support, example))
 
 
 @admin_router.callback_query(F.data == "adm:config")
@@ -370,3 +382,61 @@ async def _save_support(bot: Bot, chat_id: int, state: FSMContext, settings: Set
     await mod_repo.set_setting("support", username)
     await show_config(bot, chat_id, state, settings,
                       notice=f"✅ <i>Поддержка: @{username} — кнопка появилась в меню</i>")
+
+
+# ───────────────────────── Пример верификации ───────────────────────────────
+
+async def show_example(bot: Bot, chat_id: int, state: FSMContext,
+                       error: str | None = None) -> None:
+    """Экран примера: сам кружок, если загружен, и что в нём должно быть."""
+    await state.set_state(AdminPanel.verify_example)
+    example = await mod_repo.verify_example()
+    text = EXAMPLE_ASK.format(
+        code=verification_handlers.spoken(verification_handlers.EXAMPLE_CODE))
+    if error:
+        text = f"⚠️ {error}\n\n{text}"
+    markup = kb.verify_example(bool(example))
+    if not example:
+        await screen.show(bot, chat_id, state, text, markup)
+        return
+
+    # У кружка не бывает подписи — кружок и пояснение идут двумя сообщениями
+    await screen.prepare(bot, chat_id, state)
+    ids: list[int] = []
+    try:
+        ids.append((await bot.send_video_note(chat_id, example)).message_id)
+        text += ("\n\nСейчас пример загружен — он выше. Пришлите новый кружок, "
+                 "чтобы заменить его.")
+    except TelegramBadRequest:
+        text += "\n\n<i>Загруженный кружок недоступен — пришлите новый.</i>"
+    sent = await bot.send_message(chat_id, text, reply_markup=markup)
+    await screen.remember(state, ids + [sent.message_id])
+
+
+@admin_router.callback_query(F.data == "adm:cfg:example")
+async def example_button(call: CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    await show_example(call.bot, screen.chat_id(call), state)
+
+
+@admin_router.callback_query(F.data == "adm:cfg:example:del")
+async def example_delete(call: CallbackQuery, state: FSMContext,
+                         settings: Settings) -> None:
+    await call.answer()
+    await mod_repo.set_setting("verify_example", "")
+    await show_config(call.bot, screen.chat_id(call), state, settings,
+                      notice="🗑 <i>Пример убран — задание показывается без него</i>")
+
+
+@admin_router.message(AdminPanel.verify_example)
+async def example_save(message: Message, state: FSMContext, settings: Settings) -> None:
+    # Пересланный кружок здесь подходит: пример обычно записывает не сам админ
+    await screen.drop(message)
+    if message.video_note is None:
+        await show_example(message.bot, message.chat.id, state,
+                           "Нужен именно кружок — фото и обычное видео не подойдут.")
+        return
+    await mod_repo.set_setting("verify_example", message.video_note.file_id)
+    await show_config(message.bot, message.chat.id, state, settings,
+                      notice="✅ <i>Пример сохранён — его увидят все, кто проходит "
+                             "верификацию</i>")

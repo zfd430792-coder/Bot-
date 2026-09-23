@@ -116,8 +116,11 @@ async def count_open_reports() -> int:
 
 # ───────────────────────────── Верификация ──────────────────────────────────
 
-async def create_verification(user_id: int, code: str, forced: bool,
+async def create_verification(user_id: int, forced: bool,
                               requested_by: int | None) -> int:
+    """Новая заявка. Задание (код и действие) выдаётся позже, когда человек
+    садится записывать кружок: код живёт недолго и не должен истечь, пока
+    человек ещё не открыл бота."""
     await db.execute(
         "UPDATE verifications SET status = 'rejected', review_note = 'заменена новой' "
         "WHERE user_id = ? AND status = 'pending'",
@@ -125,22 +128,45 @@ async def create_verification(user_id: int, code: str, forced: bool,
     )
     return await db.insert(
         "INSERT INTO verifications (user_id, code, forced, requested_by, status) "
-        "VALUES (?, ?, ?, ?, 'pending')",
-        (user_id, code, int(forced), requested_by),
+        "VALUES (?, '', ?, ?, 'pending')",
+        (user_id, int(forced), requested_by),
     )
 
 
-async def attach_verification_media(user_id: int, media_type: str, media_id: str) -> aiosqlite.Row | None:
-    await db.execute(
-        "UPDATE verifications SET media_type = ?, media_id = ? "
-        "WHERE id = (SELECT id FROM verifications WHERE user_id = ? AND status = 'pending' "
-        "ORDER BY id DESC LIMIT 1)",
-        (media_type, media_id, user_id),
-    )
+async def current_verification(user_id: int) -> aiosqlite.Row | None:
+    """Открытая заявка человека. task_age — сколько секунд назад выдано
+    задание (NULL, пока не выдано)."""
     return await db.fetchone(
-        "SELECT * FROM verifications WHERE user_id = ? AND status = 'pending' "
+        "SELECT *, CAST(strftime('%s', 'now') - strftime('%s', issued_at) AS INTEGER) "
+        "AS task_age FROM verifications WHERE user_id = ? AND status = 'pending' "
         "ORDER BY id DESC LIMIT 1",
         (user_id,),
+    )
+
+
+async def awaiting_review(user_id: int) -> bool:
+    """Кружок прислан и ждёт администратора."""
+    row = await db.fetchone(
+        "SELECT 1 FROM verifications WHERE user_id = ? AND status = 'pending' "
+        "AND media_id IS NOT NULL",
+        (user_id,),
+    )
+    return row is not None
+
+
+async def issue_verification_task(verification_id: int, code: str, action: str) -> None:
+    await db.execute(
+        "UPDATE verifications SET code = ?, action = ?, issued_at = datetime('now') "
+        "WHERE id = ?",
+        (code, action, verification_id),
+    )
+
+
+async def attach_verification_media(verification_id: int, media_type: str,
+                                    media_id: str) -> None:
+    await db.execute(
+        "UPDATE verifications SET media_type = ?, media_id = ? WHERE id = ?",
+        (media_type, media_id, verification_id),
     )
 
 
@@ -210,3 +236,8 @@ async def get_int_setting(key: str, default: int) -> int:
 async def support_username() -> str:
     """Контакт поддержки без «@». Пустая строка — ещё не указан."""
     return (await get_setting("support", "") or "").strip().lstrip("@")
+
+
+async def verify_example() -> str:
+    """file_id кружка-примера для верификации. Пустая строка — не загружен."""
+    return (await get_setting("verify_example", "") or "").strip()

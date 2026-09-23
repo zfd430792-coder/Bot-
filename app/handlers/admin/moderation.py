@@ -1,7 +1,8 @@
 """Модерация: баны, жалобы, верификация.
 
 Жалобы и заявки на верификацию разбираются по одной: на экране одна жалоба
-с карточкой нарушителя (или одна заявка с фото) и inline-кнопки решения.
+с карточкой нарушителя (или одна заявка: анкета, кружок и задание) и
+inline-кнопки решения.
 Кнопки несут номер жалобы или заявки, поэтому решение относится ровно к
 той, под которой нажато. «⏭ Дальше» откладывает текущую до следующего
 захода в раздел.
@@ -158,14 +159,13 @@ async def report_action(call: CallbackQuery, state: FSMContext, bot: Bot,
                           f"👌 <i>Жалоба #{report_id} отклонена</i>")
         return
     if action == "req":
-        code = await verification_handlers.request_verification(
-            bot, target_id, forced=True, admin_id=admin_id)
-        if code is None:
+        if not await verification_handlers.request_verification(
+                bot, target_id, forced=True, admin_id=admin_id):
             notice = "🛡 <i>Это владелец бота — проверки на него не действуют</i>"
         else:
             await mod_repo.close_report(report_id, admin_id, "done")
             notice = (f"✅ <i>По жалобе #{report_id} запрошена верификация "
-                      f"<code>{target_id}</code>, код: <code>{code}</code></i>")
+                      f"<code>{target_id}</code></i>")
         await show_report(bot, chat_id, state, is_admin, notice)
 
 
@@ -173,7 +173,8 @@ async def report_action(call: CallbackQuery, state: FSMContext, bot: Bot,
 
 async def show_verification(bot: Bot, chat_id: int, state: FSMContext, is_admin: bool,
                             notice: str | None = None) -> None:
-    """Следующая заявка с фото (кроме отложенных) — или панель."""
+    """Следующая заявка (кроме отложенных) — или панель. На экране подряд:
+    анкета, чтобы сверить лицо, кружок и что в нём должно быть."""
     data = await state.get_data()
     skipped = set(data.get("verify_skip") or [])
     rows = [r for r in await mod_repo.pending_verifications(limit=50)
@@ -192,26 +193,30 @@ async def show_verification(bot: Bot, chat_id: int, state: FSMContext, is_admin:
         + f"✅ <b>Заявка #{row['id']}</b> · осталось: {len(rows)}\n"
         f"<b>{profile_service.esc(row['name'] or '—')}</b> "
         f"<code>{row['user_id']}</code> @{row['username'] or '—'}\n"
-        f"Код на фото должен быть: <code>{row['code']}</code>\n"
-        f"Тип: {'запрошена админом' if row['forced'] else 'по своей инициативе'}"
+        f"{verification_handlers.task_summary(row)}\n"
+        f"Тип: {'запрошена админом' if row['forced'] else 'по своей инициативе'}\n\n"
+        + ("☝️ Сверьте лицо в анкете и в кружке, код и действие." if row["action"]
+           else "☝️ Сверьте лицо в анкете и на фото проверки, код на листе.")
     )
     markup = kb.verify_view(int(row["id"]))
     await screen.prepare(bot, chat_id, state)
     sent_ids: list[int] = []
+    target = await users_repo.get_user(row["user_id"])
+    if target is not None and target["registered"]:
+        sent_ids += await profile_service.send_card(
+            bot, chat_id, target, show_distance=False, header="👤 <b>Анкета</b>")
     try:
+        # Фото и обычное видео — заявки прежней версии, до кружков
         if row["media_type"] == "photo":
-            sent = await bot.send_photo(chat_id, row["media_id"], caption=caption,
-                                        reply_markup=markup)
+            media = await bot.send_photo(chat_id, row["media_id"])
         elif row["media_type"] == "video":
-            sent = await bot.send_video(chat_id, row["media_id"], caption=caption,
-                                        reply_markup=markup)
+            media = await bot.send_video(chat_id, row["media_id"])
         else:
-            circle = await bot.send_video_note(chat_id, row["media_id"])
-            sent_ids.append(circle.message_id)
-            sent = await bot.send_message(chat_id, caption, reply_markup=markup)
+            media = await bot.send_video_note(chat_id, row["media_id"])
+        sent_ids.append(media.message_id)
     except Exception:
-        sent = await bot.send_message(chat_id, caption + "\n\n<i>Медиа недоступно.</i>",
-                                      reply_markup=markup)
+        caption += "\n\n<i>Медиа недоступно.</i>"
+    sent = await bot.send_message(chat_id, caption, reply_markup=markup)
     await screen.remember(state, sent_ids + [sent.message_id])
 
 
@@ -248,9 +253,9 @@ async def verification_action(call: CallbackQuery, state: FSMContext, bot: Bot,
         await state.set_state(AdminPanel.verify_reject_reason)
         await state.update_data(verify_id=verification_id)
         await screen.show(bot, chat_id, state,
-                          "Почему отклоняем? Напишите причину — пользователь её увидит.\n"
-                          "Например: <i>кода не видно на фото</i>",
-                          kb.REJECT_BACK)
+                          "❌ <b>Почему отклоняем?</b>\n\nВыберите причину или "
+                          "напишите свою — пользователь её увидит.",
+                          kb.verify_reject(verification_id, texts.VERIFY_REJECT_REASONS))
     elif action == "ban":
         await panel.ask_ban_reason(bot, chat_id, state, user_id, "verify")
     elif action == "next":
@@ -259,19 +264,14 @@ async def verification_action(call: CallbackQuery, state: FSMContext, bot: Bot,
         await show_verification(bot, chat_id, state, is_admin)
 
 
-@router.message(AdminPanel.verify_reject_reason, F.text)
-async def reject_reason(message: Message, state: FSMContext, bot: Bot,
-                        is_admin: bool) -> None:
-    await screen.drop(message)
-    chat_id = message.chat.id
-    verification_id = int((await state.get_data()).get("verify_id") or 0)
+async def _reject(bot: Bot, chat_id: int, state: FSMContext, is_admin: bool,
+                  verification_id: int, admin_id: int, reason: str) -> None:
     record = await mod_repo.get_verification(verification_id)
     if record is None or record["status"] != "pending":
         await show_verification(bot, chat_id, state, is_admin, "<i>Заявка уже обработана</i>")
         return
 
-    reason = (message.text or "").strip()
-    await mod_repo.review_verification(verification_id, message.from_user.id, False, reason)
+    await mod_repo.review_verification(verification_id, admin_id, False, reason)
     await users_repo.update_user(record["user_id"], verify_status="rejected")
     if record["forced"]:
         await safe_send(bot, record["user_id"], texts.VERIFY_REJECTED_FORCED.format(
@@ -281,6 +281,27 @@ async def reject_reason(message: Message, state: FSMContext, bot: Bot,
             reason=profile_service.esc(reason)))
     await show_verification(bot, chat_id, state, is_admin,
                             f"❌ <i>Заявка #{verification_id} отклонена</i>")
+
+
+@router.callback_query(F.data.startswith("adm:vrj:"))
+async def reject_ready_reason(call: CallbackQuery, state: FSMContext, bot: Bot,
+                              is_admin: bool) -> None:
+    """Готовая причина отказа: adm:vrj:<причина>:<номер заявки>."""
+    await call.answer()
+    key, verification_id = _parts(call)
+    _, reason = texts.VERIFY_REJECT_REASONS.get(key, ("", "проверка не пройдена"))
+    await _reject(bot, screen.chat_id(call), state, is_admin, verification_id,
+                  call.from_user.id, reason)
+
+
+@router.message(AdminPanel.verify_reject_reason, F.text)
+async def reject_reason(message: Message, state: FSMContext, bot: Bot,
+                        is_admin: bool) -> None:
+    """Своя причина — одним сообщением."""
+    await screen.drop(message)
+    verification_id = int((await state.get_data()).get("verify_id") or 0)
+    await _reject(bot, message.chat.id, state, is_admin, verification_id,
+                  message.from_user.id, (message.text or "").strip())
 
 
 # ──────────────────────────────── Бан ───────────────────────────────────────
@@ -403,13 +424,11 @@ async def verify_command(message: Message, bot: Bot) -> None:
     if target is None:
         await message.answer("Пользователь не найден.")
         return
-    code = await verification_handlers.request_verification(
-        bot, target["id"], forced=True, admin_id=message.from_user.id
-    )
-    if code is None:
+    if not await verification_handlers.request_verification(
+            bot, target["id"], forced=True, admin_id=message.from_user.id):
         await message.answer("Это владелец бота — проверки на него не действуют.")
         return
     await message.answer(
-        f"✅ Требование отправлено. Код: <code>{code}</code>\n"
-        "Пока пользователь не пройдёт проверку, бот для него закрыт."
+        "✅ Требование отправлено: пользователь запишет кружок с кодом.\n"
+        "Пока он не пройдёт проверку, бот для него закрыт."
     )
