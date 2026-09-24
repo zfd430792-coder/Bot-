@@ -118,7 +118,7 @@ async def count_open_reports() -> int:
 
 async def create_verification(user_id: int, forced: bool,
                               requested_by: int | None) -> int:
-    """Новая заявка. Задание (код и действие) выдаётся позже, когда человек
+    """Новая заявка. Задание (код) выдаётся позже, когда человек
     садится записывать кружок: код живёт недолго и не должен истечь, пока
     человек ещё не открыл бота."""
     await db.execute(
@@ -154,11 +154,11 @@ async def awaiting_review(user_id: int) -> bool:
     return row is not None
 
 
-async def issue_verification_task(verification_id: int, code: str, action: str) -> None:
+async def issue_verification_task(verification_id: int, code: str) -> None:
     await db.execute(
-        "UPDATE verifications SET code = ?, action = ?, issued_at = datetime('now') "
+        "UPDATE verifications SET code = ?, action = NULL, issued_at = datetime('now') "
         "WHERE id = ?",
-        (code, action, verification_id),
+        (code, verification_id),
     )
 
 

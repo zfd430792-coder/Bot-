@@ -5,12 +5,12 @@
 * администратор требует проверку — бот закрыт до подтверждения (см. gates.py).
 
 Проверка — кружок: его записывают прямо с камеры, поэтому чужое фото или
-старое видео не подсунуть. В кружке человек показывает листок, где написан
-код, а под ним @ник бота, читает код вслух и делает одно действие. Код и
-действие бот выбирает случайно в момент, когда человек садится записывать, и
-задание живёт TASK_MINUTES минут. Ник бота на листке не даёт выдать за
-проверку готовый кружок из чужого канала. Принимается только кружок — не
-фото, не обычное видео и не пересланный.
+старое видео не подсунуть. В кружке человек показывает листок, где крупно
+написан код, а под ним @ник бота, и читает код вслух. Код бот выбирает
+случайно в момент, когда человек садится записывать, и задание живёт
+TASK_MINUTES минут. Ник бота на листке не даёт выдать за проверку готовый
+кружок из чужого канала. Принимается только кружок — не фото, не обычное
+видео и не пересланный.
 
 Если администратор загрузил кружок-пример («⚙️ Настройки бота»), он стоит
 над заданием. Заявки администратор разбирает в админке («✅ Верификация»),
@@ -42,7 +42,7 @@ from app.states import Verification
 router = Router(name="verification")
 
 TASK_MINUTES = 10       # столько живёт задание: записанный заранее кружок не подойдёт
-MIN_SECONDS = 3         # короче не успеть показать листок, назвать код и сделать действие
+MIN_SECONDS = 3         # короче не успеть показать листок и назвать код
 MAX_SECONDS = 20
 # Код из кружка-примера. Настоящим он не выдаётся — иначе проверку прошёл бы
 # сам пример
@@ -65,15 +65,13 @@ async def bot_name(bot: Bot) -> str:
 
 def task_summary(record: Mapping[str, Any], bot_nick: str) -> str:
     """Что должно быть в кружке — чек-лист для администратора."""
-    if not record["action"]:
+    if record["issued_at"] is None:
         # Заявка прежней версии: фото с кодом на листе бумаги
         return f"Код на фото должен быть: <code>{record['code']}</code>"
-    action = texts.VERIFY_ACTIONS.get(record["action"], record["action"])
     return (
         "В кружке должно быть:\n"
-        f"• листок: <b>{record['code']}</b>, под ним <b>{bot_nick}</b>\n"
-        f"• код вслух: <b>{record['code']}</b>\n"
-        f"• действие: {action}"
+        f"• листок: <b>{record['code']}</b>, под ним <b>{bot_nick}</b> — чётко видно\n"
+        f"• код вслух: <b>{record['code']}</b>"
     )
 
 
@@ -81,7 +79,7 @@ async def request_verification(bot: Bot, user_id: int, *, forced: bool,
                                admin_id: int | None = None,
                                notify: bool = True) -> bool:
     """Открывает заявку и уведомляет пользователя (notify=False — экран
-    покажет вызывающий). Код и действие бот выдаст позже, когда человек
+    покажет вызывающий). Код бот выдаст позже, когда человек
     нажмёт «🎥 Записать кружок».
 
     Возвращает False, если это владелец бота — на него ограничения не
@@ -134,7 +132,7 @@ async def self_request(call: CallbackQuery, state: FSMContext, bot: Bot,
 def _fresh(record: Mapping[str, Any]) -> bool:
     """Задание выдано, и его срок не вышел."""
     age = record["task_age"]
-    return bool(record["action"]) and age is not None and age < TASK_MINUTES * 60
+    return age is not None and age < TASK_MINUTES * 60
 
 
 async def _task(user: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -145,8 +143,7 @@ async def _task(user: Mapping[str, Any]) -> Mapping[str, Any]:
         await mod_repo.create_verification(user["id"], bool(user["verify_forced"]), None)
         record = await mod_repo.current_verification(user["id"])
     if not _fresh(record):
-        action = secrets.choice(list(texts.VERIFY_ACTIONS))
-        await mod_repo.issue_verification_task(record["id"], new_code(), action)
+        await mod_repo.issue_verification_task(record["id"], new_code())
         record = await mod_repo.current_verification(user["id"])
     return record
 
@@ -159,7 +156,6 @@ async def _show_task(bot: Bot, chat_id: int, state: FSMContext,
     text = texts.VERIFY_TASK.format(
         code=record["code"],
         bot=await bot_name(bot),
-        action=texts.VERIFY_ACTIONS.get(record["action"], record["action"]),
         minutes=TASK_MINUTES,
     )
     example = await mod_repo.verify_example()

@@ -190,7 +190,8 @@ async def show_verification(bot: Bot, chat_id: int, state: FSMContext, is_admin:
     await state.update_data(verify_skip=sorted(skipped))
     checklist = verification_handlers.task_summary(
         row, await verification_handlers.bot_name(bot))
-    hint = ("☝️ Сверьте лицо в анкете и в кружке, листок, код и действие." if row["action"]
+    hint = ("☝️ Сверьте лицо в анкете и в кружке, листок и код."
+            if row["issued_at"] is not None
             else "☝️ Сверьте лицо в анкете и на фото проверки, код на листе.")
     caption = (
         (f"{notice}\n\n" if notice else "")

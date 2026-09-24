@@ -114,7 +114,7 @@ CREATE TABLE IF NOT EXISTS verifications (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id     INTEGER NOT NULL,
     code        TEXT NOT NULL,                   -- '' — задание ещё не выдано
-    action      TEXT,                            -- что сделать в кружке (texts.VERIFY_ACTIONS)
+    action      TEXT,                            -- прежняя версия: жест в кружке, больше не выдаётся
     issued_at   TEXT,                            -- когда показано задание: код живёт 10 минут
     media_type  TEXT,
     media_id    TEXT,

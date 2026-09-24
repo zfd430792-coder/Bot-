@@ -578,11 +578,10 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     task = await mod_repo.current_verification(CAROL)
     code = task["code"]
     check(len(code) == 4 and code.isdigit(), "код — четыре цифры: их легко написать и назвать")
-    check(task["action"] in texts.VERIFY_ACTIONS, "к коду выдано случайное действие")
     check(h.said(f"код <b>{code}</b>, а под ним — ник бота <b>@test_bot</b>"),
           "на листке — код, а под ним ник бота")
-    check(h.said("прочитайте код вслух") and h.said(texts.VERIFY_ACTIONS[task["action"]]),
-          "в кружке — листок, код вслух и действие")
+    check(h.said("покажите листок и прочитайте код вслух") and not h.said("Затем"),
+          "в кружке — только листок и код вслух, без жестов")
     check(h.said("10 минут"), "сказано, сколько действует задание")
     check(not h.session.of_type("SendVideoNote"), "пример не загружен — задание без него")
     h.clear()
@@ -634,9 +633,8 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     await h.click(ADMIN, "adm:verify", username="boss")
     check(h.said("Заявка #") and h.said("Карина"), "заявка открывается вместе с анкетой")
     check(h.said(f"листок: <b>{task['code']}</b>, под ним <b>@test_bot</b>")
-          and h.said(f"код вслух: <b>{task['code']}</b>")
-          and h.said(texts.VERIFY_ACTIONS[task["action"]]),
-          "админ видит чек-лист: листок с ником бота, код вслух, действие")
+          and h.said(f"код вслух: <b>{task['code']}</b>") and not h.said("действие"),
+          "админ видит чек-лист: листок с ником бота и код вслух")
     names = h.session.method_names()
     check("SendPhoto" in names and "SendVideoNote" in names
           and names.index("SendPhoto") < names.index("SendVideoNote"),
@@ -1571,7 +1569,7 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     await h.click(ADMIN, "adm:config", username="boss")
     check("adm:cfg:example" in h.data(ADMIN), "в настройках есть пример верификации")
     await h.click(ADMIN, "adm:cfg:example", username="boss")
-    check(h.said("Мой код — 1234") and h.said("сверху код 1234, под ним @test_bot"),
+    check(h.said("Мой код — 1234") and h.said("сверху крупно код 1234, под ним @test_bot"),
           "владельцу подсказано, что снять в примере: листок с ником бота")
     await h.feed(photo_update(h.bot, ADMIN, username="boss"))
     check(h.said("Нужен именно кружок"), "пример — только кружок")
