@@ -45,7 +45,6 @@ LINK_RE = re.compile(r"(https?://|www\.|t\.me/|@[a-zA-Z0-9_]{4,}|telegram\.me)",
 # украшения просто убираем, а не заставляем человека переписывать имя.
 NAME_EXTRA_CHARS = " -'’."
 
-GENDER_TITLE = {"m": "парень", "f": "девушка"}
 # Надписи нижних кнопок прежней версии: у кого-то они ещё открыты в чате
 GENDER_BY_TEXT = {"👨 Я парень": "m", "👩 Я девушка": "f"}
 LOOKING_BY_TEXT = {"👨 Парней": "m", "👩 Девушек": "f", "💞 Всех": "any"}
@@ -55,33 +54,11 @@ REFILL_TEXT = "✏️ Заполнить заново"
 PICK_BUTTON = "Выберите вариант кнопкой под сообщением."
 
 
-def progress(user: Mapping[str, Any] | None, step: int) -> str:
-    """Короткая сводка заполненного — вместо отдельных сообщений «✅ принято».
-
-    Берём только шаги до текущего: когда анкету заполняют заново, старые
-    ответы на следующие шаги ещё в базе, но они уже не в счёт.
-    """
-    if user is None:
-        return ""
-    answers = [
-        GENDER_TITLE.get(user["gender"] or "", ""),
-        f"ищу {profile.LOOKING_WORD.get(user['looking_for'], '')}" if user["looking_for"] else "",
-        profile.years(user["age"]) if user["age"] else "",
-        profile.esc(user["name"]) if user["name"] else "",
-        "фото" if user["media_id"] else "",
-        "о себе" if user["about"] else "",
-    ]
-    parts = [answer for answer in answers[:step - 1] if answer]
-    if not parts:
-        return ""
-    return "✅ <i>" + " · ".join(parts) + "</i>\n\n"
-
-
-async def _step(bot: Bot, chat_id: int, state: FSMContext, step: int, text: str,
+async def _step(bot: Bot, chat_id: int, state: FSMContext, text: str,
                 markup=None, error: str | None = None) -> None:
-    """Показывает шаг единственным сообщением вместо предыдущего."""
-    user = await users_repo.get_user(chat_id)
-    body = (f"⚠️ {error}\n\n" if error else "") + progress(user, step) + text
+    """Показывает вопрос единственным сообщением вместо предыдущего.
+    Без номера шага и пересказа прошлых ответов — только сам вопрос."""
+    body = (f"⚠️ {error}\n\n" if error else "") + text
     await screen.show(bot, chat_id, state, body, markup)
 
 
@@ -90,19 +67,19 @@ async def _step(bot: Bot, chat_id: int, state: FSMContext, step: int, text: str,
 async def ask_gender(bot: Bot, chat_id: int, state: FSMContext,
                      error: str | None = None) -> None:
     await state.set_state(Registration.gender)
-    await _step(bot, chat_id, state, 1, texts.REG_GENDER, kb.GENDER, error)
+    await _step(bot, chat_id, state, texts.REG_GENDER, kb.GENDER, error)
 
 
 async def ask_looking(bot: Bot, chat_id: int, state: FSMContext,
                       error: str | None = None) -> None:
     await state.set_state(Registration.looking_for)
-    await _step(bot, chat_id, state, 2, texts.REG_LOOKING, kb.LOOKING, error)
+    await _step(bot, chat_id, state, texts.REG_LOOKING, kb.LOOKING, error)
 
 
 async def ask_age(bot: Bot, chat_id: int, state: FSMContext,
                   error: str | None = None) -> None:
     await state.set_state(Registration.age)
-    await _step(bot, chat_id, state, 3, texts.REG_AGE, None, error)
+    await _step(bot, chat_id, state, texts.REG_AGE, None, error)
 
 
 async def ask_name(bot: Bot, chat_id: int, state: FSMContext,
@@ -112,21 +89,21 @@ async def ask_name(bot: Bot, chat_id: int, state: FSMContext,
     # Имя из Telegram — одной кнопкой, но только если им реально можно
     # пользоваться: кнопка, которая всегда отвечает «не подходит», хуже её отсутствия
     suggestion = validate_name(tg_name, settings)
-    await _step(bot, chat_id, state, 4, texts.REG_NAME,
+    await _step(bot, chat_id, state, texts.REG_NAME,
                 kb.name_suggestion(suggestion), error)
 
 
 async def ask_media(bot: Bot, chat_id: int, state: FSMContext,
                     settings: Settings, error: str | None = None) -> None:
     await state.set_state(Registration.media)
-    await _step(bot, chat_id, state, 5,
+    await _step(bot, chat_id, state,
                 texts.REG_MEDIA.format(sec=settings.max_video_seconds), None, error)
 
 
 async def ask_about(bot: Bot, chat_id: int, state: FSMContext,
                     settings: Settings, error: str | None = None) -> None:
     await state.set_state(Registration.about)
-    await _step(bot, chat_id, state, 6,
+    await _step(bot, chat_id, state,
                 texts.REG_ABOUT.format(max_len=settings.about_max_len), kb.ABOUT, error)
 
 
@@ -134,17 +111,16 @@ async def ask_city(bot: Bot, chat_id: int, state: FSMContext,
                    error: str | None = None) -> None:
     await state.set_state(Registration.city)
     await state.update_data(city_options=None)
-    await _step(bot, chat_id, state, 7, texts.REG_CITY, rkb.request_location(), error)
+    await _step(bot, chat_id, state, texts.REG_CITY, rkb.request_location(), error)
 
 
 async def ask_region(bot: Bot, chat_id: int, state: FSMContext,
                      error: str | None = None) -> None:
     await state.set_state(Registration.region_fallback)
     await _step(
-        bot, chat_id, state, 7,
-        texts.REG_CITY_NOT_FOUND + "\n\n🗺 Или напишите вашу <b>область / "
-        "регион</b> — например, <code>Волгоградская область</code>. "
-        "Тогда я буду искать по области.",
+        bot, chat_id, state,
+        texts.REG_CITY_NOT_FOUND + "\n\nМожно написать область — например, "
+        "<code>Волгоградская область</code>.",
         rkb.request_location(), error,
     )
 
@@ -459,7 +435,7 @@ async def set_city(message: Message, state: FSMContext, user,
             {"title": c.title, "name": c.name, "region": c.region,
              "country": c.country, "lat": c.lat, "lon": c.lon} for c in found
         ])
-        await _step(bot, chat_id, state, 7, texts.REG_CITY_CHOICE,
+        await _step(bot, chat_id, state, texts.REG_CITY_CHOICE,
                     kb.city_choices([c.title for c in found]))
         return
 

@@ -348,7 +348,7 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     await h.click(ALICE, "onb:accept")
     user = await users_repo.get_user(ALICE)
     check(user["rules_accepted"] == 1, "согласие с правилами сохранено")
-    check(h.said("Ваш пол"), "сразу начинается анкета")
+    check(h.said("Вы парень или девушка"), "сразу начинается анкета")
     check(h.data(ALICE) == ["reg:gender:m", "reg:gender:f"], "пол выбирается кнопкой")
     h.clear()
 
@@ -383,7 +383,7 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     await h.text(ALICE, "Захожу сюда за живым общением. Пишите: t.me/spamchannel")
     check(h.said("нельзя оставлять ссылки"), "ссылки в описании блокируются")
     await h.text(ALICE, "Люблю книги, горы и настолки.")
-    check(h.said("Откуда вы"), "дальше спрашивается город")
+    check(h.said("Из какого вы города"), "дальше спрашивается город")
     check(h.keyboard(ALICE) == [rkb.LOCATION],
           "геопозиция — единственная нижняя кнопка: иначе Telegram её не отдаёт")
     h.clear()
@@ -760,7 +760,7 @@ async def scenarios(h: "Harness", settings, storage) -> int:
 
     # Заполнить заново: те же шаги, старые ответы в прогресс не попадают
     await h.click(ALICE, "pr:refill")
-    check(h.said("Шаг 1 из 7"), "заполнение заново начинается с первого шага")
+    check(h.said("Вы парень или девушка"), "заполнение заново начинается с первого вопроса")
     check(not h.said("Урюпинск") and not h.said("26 лет"),
           "старые ответы не выдаются за заполненные")
     await h.click(ALICE, "reg:gender:f")
@@ -1302,9 +1302,10 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     check(edits >= 4 and sent <= 4,
           f"шаги правятся на месте: правок {edits}, новых сообщений {sent}")
 
-    progress_shown = any("Экранов" in (getattr(c, "text", "") or "")
-                         for c in h.session.calls)
-    check(progress_shown, "заполненное видно строкой прогресса, а не сообщениями")
+    questions = [getattr(c, "text", "") or "" for c in h.session.calls
+                 if type(c).__name__ in ("SendMessage", "EditMessageText")]
+    check(not any("Шаг" in t or "Экранов" in t for t in questions),
+          "в вопросах нет номеров шагов и пересказа прошлых ответов")
     check(h.said("Вот как её увидят другие"), "предпросмотр показан")
     h.clear()
 
@@ -1324,8 +1325,8 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     deleted = {c.message_id for c in h.session.of_type("DeleteMessage")
                if c.chat_id == RESTART}
     check(set(commands) <= deleted, "сами команды /start из чата убраны")
-    check(h.session.visible(RESTART) == 1, "в чате один «Шаг 1 из 7», а не три")
-    check(h.said("Шаг 1 из 7"), "показан первый шаг анкеты")
+    check(h.session.visible(RESTART) == 1, "в чате один первый вопрос, а не три")
+    check(h.said("Вы парень или девушка"), "показан первый вопрос анкеты")
 
     for _ in range(3):
         await h.text(NEWBIE, "/start", username="newbie2")
@@ -1543,7 +1544,7 @@ async def scenarios(h: "Harness", settings, storage) -> int:
 
     await h.dp.storage.set_state(sneaky_key, None)
     await h.click(SNEAKY, "pr:refill", username="sneaky")
-    check(not h.said("Шаг 1 из 7"), "«Заполнить анкету заново» без анкеты не открывает шаги")
+    check(not h.said("Вы парень или девушка"), "«Заполнить анкету заново» без анкеты не открывает шаги")
     await h.dp.storage.set_state(sneaky_key, None)
     await h.click(SNEAKY, "ver:self", username="sneaky")
     await h.click(SNEAKY, "ver:send", username="sneaky")
