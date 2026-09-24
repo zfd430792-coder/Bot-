@@ -1283,6 +1283,11 @@ async def scenarios(h: "Harness", settings, storage) -> int:
     deleted = {c.message_id for c in h.session.of_type("DeleteMessage")}
     check(bad_age in deleted, "неверный ответ пользователя удаляется")
     check(h.said("Введите возраст числом"), "ошибка показана в том же экране")
+    for bad in ("двадцать", "2²", "25 лет"):
+        h.clear()
+        await h.text(SCREEN, bad, username="screenuser")
+        check(h.said("Введите возраст числом"), f"возраст «{bad}» не принимается")
+    check((await users_repo.get_user(SCREEN))["age"] is None, "возраст не записан")
 
     good_age = await h.text(SCREEN, "30", username="screenuser")
     name_msg = await h.text(SCREEN, "Экранов", username="screenuser")

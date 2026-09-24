@@ -236,7 +236,9 @@ async def set_age(message: Message, state: FSMContext, user, settings: Settings)
     raw = (message.text or "").strip()
     bot, chat_id = message.bot, message.chat.id
 
-    if not raw.isdigit():
+    # Только цифры 0–9: isdigit() пропускает и «²», и цифры других
+    # алфавитов, а на «²» int() падает
+    if not (raw.isascii() and raw.isdigit()):
         await ask_age(bot, chat_id, state, texts.REG_AGE_BAD.format(
             min_age=settings.min_age, max_age=settings.max_age))
         return
